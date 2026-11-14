@@ -518,6 +518,13 @@ void InterfaceTask::updateTouch() {
         snprintf(buf_, sizeof(buf_), "Ring: %+d (angle %d)", ring_steps, (int)touch_ring_.angle());
         log(buf_);
         motor_task_.playHaptic(false);
+
+        // Move the knob's value by the same number of steps
+        PB_SmartKnobConfig config = latest_config_;
+        config.position = latest_state_.current_position + ring_steps;
+        config.sub_position_unit = 0;
+        config.position_nonce = latest_config_.position_nonce + 1;
+        applyConfig(config, remote_controlled_);
     }
 
     TouchGesture gesture = touch_gestures_.update(touching, x, y, now);

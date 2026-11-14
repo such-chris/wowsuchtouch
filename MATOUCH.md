@@ -102,7 +102,7 @@ Every gesture is printed in the monitor, e.g. `Touch: DOUBLE_TAP at (120, 98)`, 
 | Long press (~0.6 s) | firm click while still held | nothing yet (reserved) |
 | Swipe left / right | light click | next / previous mode |
 | Swipe up / down | none | nothing yet (reserved) |
-| Slide around the rim | light click per step | test only: prints `Ring: +1 (angle 93)` |
+| Slide around the rim | light click per step | moves the value one step per 15 degrees; prints `Ring: +1 (angle 93)` |
 
 Single and double taps wait ~0.25 s to make sure another tap isn't coming.
 
