@@ -132,4 +132,15 @@ The first three modes send keys whenever the value changes (knob, rim TRACK or F
 Code: `firmware/src/ble_output.*` (keys), `updateBleOutput()` in `interface_task.cpp` (which mode sends what).
 Library: ESP32-BLE-CompositeHID v0.4.0 (NimBLE).
 
-Not done yet: the Function button, long-press actions.
+## Power and battery
+
+- **On (battery):** hold the Function button 1-2 s until the screen lights, then let go.
+- **Off:** hold the Function button 2 s, then let go. On USB the knob can't switch itself off
+  (USB powers it directly); it says so in the monitor and carries on.
+- **Battery:** the monitor prints `Battery: 3.92 V (about 64%)` shortly after startup and every 30 s.
+  Rough guide only: the reading sags under load, rises while charging, and means little with no battery fitted.
+
+Code: `power_button.*` (short/long press), `battery.*` (voltage to percent), `updatePowerButton()` / `updateBattery()`
+in `interface_task.cpp`. A short press is free for a future action.
+
+Not done yet: on-knob menu, long-press touch actions.

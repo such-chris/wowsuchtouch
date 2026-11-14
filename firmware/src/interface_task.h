@@ -27,6 +27,14 @@
 #include "ble_output.h"
 #endif
 
+#ifdef PIN_POWER_BUTTON
+#include "power_button.h"
+#endif
+
+#ifdef PIN_BATTERY_ADC
+#include "battery.h"
+#endif
+
 #ifndef SK_FORCE_UART_STREAM
     #define SK_FORCE_UART_STREAM 0
 #endif
@@ -88,6 +96,17 @@ class InterfaceTask : public Task<InterfaceTask>, public Logger {
         int32_t ble_last_position_ = 0;     // value when keys were last sent
         bool ble_was_connected_ = false;
         void updateBleOutput();
+        #endif
+
+        #ifdef PIN_POWER_BUTTON
+        PowerButton power_button_;
+        void updatePowerButton();
+        void powerOff();
+        #endif
+
+        #ifdef PIN_BATTERY_ADC
+        uint32_t battery_mv_ = 0;  // latest battery reading in millivolts (0 = none yet)
+        void updateBattery();
         #endif
 
         PB_SmartKnobState latest_state_ = {};

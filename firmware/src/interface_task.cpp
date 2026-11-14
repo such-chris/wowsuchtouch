@@ -325,6 +325,10 @@ void InterfaceTask::run() {
         touch_.begin(PIN_TOUCH_SDA, PIN_TOUCH_SCL);
     #endif
 
+    #ifdef PIN_POWER_BUTTON
+        pinMode(PIN_POWER_BUTTON, INPUT_PULLUP);
+    #endif
+
     #if SK_BLE
         ble_.begin("SmartKnob");
         log("Bluetooth: pair with \"SmartKnob\" in your Mac's Bluetooth settings");
@@ -417,6 +421,14 @@ void InterfaceTask::run() {
 
         #if SK_TOUCH
             updateTouch();
+        #endif
+
+        #ifdef PIN_POWER_BUTTON
+            updatePowerButton();
+        #endif
+
+        #ifdef PIN_BATTERY_ADC
+            updateBattery();
         #endif
 
         if (!configuration_loaded_) {
@@ -733,5 +745,67 @@ void InterfaceTask::updateBleOutput() {
             ble_.arrowSteps(steps);
             break;
     }
+}
+#endif
+
+#ifdef PIN_POWER_BUTTON
+void InterfaceTask::updatePowerButton() {
+    // The button pulls its pin low when pressed
+    ButtonEvent event = power_button_.update(digitalRead(PIN_POWER_BUTTON) == LOW, millis());
+    switch (event) {
+        case ButtonEvent::SHORT_PRESS:
+            log("Button: short press (no action yet)");
+            break;
+        case ButtonEvent::LONG_PRESS:
+            powerOff();
+            break;
+        default:
+            break;
+    }
+}
+
+void InterfaceTask::powerOff() {
+    log("Powering off... release the button");
+    motor_task_.playHaptic(true);
+    delay(150);
+    #if SK_DISPLAY
+        display_task_->setBrightness(0);
+    #endif
+
+    // Let go of the power latch. On battery the power cuts as soon as the
+    // button is released (the button itself also holds the power on).
+    #ifdef PIN_POWER_HOLD
+        digitalWrite(PIN_POWER_HOLD, LOW);
+    #endif
+    delay(4000);
+
+    // Still running, so USB must be powering the board: carry on as normal
+    #ifdef PIN_POWER_HOLD
+        digitalWrite(PIN_POWER_HOLD, HIGH);
+    #endif
+    log("Still powered: on USB the knob can't switch itself off");
+}
+#endif
+
+#ifdef PIN_BATTERY_ADC
+void InterfaceTask::updateBattery() {
+    // Read at startup (after things settle) and then every 30 seconds
+    static uint32_t last_read;
+    uint32_t now = millis();
+    if (now < 2000 || (last_read != 0 && now - last_read < 30000)) {
+        return;
+    }
+    last_read = now;
+
+    // Average a few readings; the board halves the battery voltage (two 330K resistors)
+    uint32_t sum_mv = 0;
+    for (uint8_t i = 0; i < 16; i++) {
+        sum_mv += analogReadMilliVolts(PIN_BATTERY_ADC);
+    }
+    battery_mv_ = (sum_mv / 16) * 2;
+
+    snprintf(buf_, sizeof(buf_), "Battery: %.2f V (about %d%%)",
+        battery_mv_ / 1000.0f, batteryPercentFromMillivolts(battery_mv_));
+    log(buf_);
 }
 #endif
