@@ -44,6 +44,9 @@ class MotorTask : public Task<MotorTask> {
         // the finger. delta_radians = finger travel since the slide started
         // (+ = direction that raises the value).
         void setFollow(bool active, float delta_radians);
+
+        // Sleep: no holding force, the knob turns freely (its position is still tracked)
+        void setRelaxed(bool relaxed);
         void runCalibration();
 
         void addListener(QueueHandle_t queue);
@@ -60,6 +63,7 @@ class MotorTask : public Task<MotorTask> {
         char buf_[72];
 
         volatile bool follow_active_ = false;
+        volatile bool relaxed_ = false;
         volatile float follow_delta_radians_ = 0;
 
         // BLDC motor & driver instance

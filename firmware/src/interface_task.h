@@ -139,6 +139,17 @@ class InterfaceTask : public Task<InterfaceTask>, public Logger {
         bool battery_low_warned_ = false;
         UsbPower usb_power_;
         void updateUsbPower();
+
+        // Sleep: 0 = awake, 1 = dimmed, 2 = screen off + motor relaxed
+        uint8_t sleep_stage_ = 0;
+        uint32_t last_activity_ms_ = 0;
+        bool auto_off_tried_ = false;
+        bool swallow_touch_ = false;          // the touch that woke the screen does nothing else
+        int32_t activity_position_ = 0;
+        float activity_sub_position_ = 0;
+        void noteActivity();
+        void checkKnobActivity();
+        void updateSleep();
         KnobSettings settings_;
         SettingsStore settings_store_;
 

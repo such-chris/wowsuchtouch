@@ -122,7 +122,7 @@ after ~4 degrees of travel; less than that still counts as a tap. Clockwise rais
 
 - **Apps:** Mac (Volume, Scroll, Arrows) and Demo (Scott's haptic behaviors). Home = Mac.
 - **Settings:** Brightness (10-100%), Click strength (20-200%, felt as you turn), Touch (rim: Track /
-  Follow / Off), Bluetooth, Calibrate, Battery, Version.
+  Follow / Off), Auto off, Bluetooth, Calibrate, Battery, Version.
 - **Bluetooth:** Connected / Not connected (tap: paired-device count), Add device (pairing open for
   2 minutes, with a countdown), Forget all. Outside pairing only already-paired devices can connect
   (`PAIRED_ONLY` in `ble_output.cpp`; set false if a paired Mac ever can't reconnect). With nothing
@@ -164,6 +164,11 @@ Library: ESP32-BLE-CompositeHID v0.4.0 (NimBLE).
   under motor load, and means little with no battery fitted.
 - **USB / charging:** detected when plugged into a computer (the USB port's 1 ms "frame" signal keeps
   counting). A plain wall charger can't be detected, and a sleeping Mac may stop the signal.
+
+- **Sleep:** after 30 s idle the screen dims; after 2 min the screen turns off and the motor relaxes
+  (knob turns freely, no clicks). Any touch, turn or button press wakes it; the waking touch/turn does
+  nothing else. **Auto off** (Settings, default 15 min; 5 / 15 / 30 min / Never) fully powers off when
+  idle on battery. Not while plugged into a computer. Times: `SLEEP_*` in `interface_task.cpp`.
 
 Code: `power_button.*` (short/long press), `battery.*` (voltage to percent), `updatePowerButton()` / `updateBattery()`
 in `interface_task.cpp`. A short press is free for a future action.

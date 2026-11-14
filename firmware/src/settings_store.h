@@ -9,6 +9,7 @@ struct KnobSettings {
     uint8_t touch_mode = 0;        // rim slide: 0 = track, 1 = follow, 2 = off
     int32_t volume = 32;           // last Volume level (0-64)
     uint8_t app = 0;               // last app opened
+    uint8_t auto_off = 1;          // power off when idle on battery: 0 = 5 min, 1 = 15, 2 = 30, 3 = never
 };
 
 // Reads and writes KnobSettings in the ESP32's built-in key-value storage

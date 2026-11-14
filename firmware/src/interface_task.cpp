@@ -328,6 +328,7 @@ enum SettingItem {
     SET_BRIGHTNESS,
     SET_HAPTICS,
     SET_TOUCH,
+    SET_AUTO_OFF,
     SET_BLUETOOTH,
     SET_CALIBRATE,
     SET_BATTERY,
@@ -335,8 +336,16 @@ enum SettingItem {
     SET_COUNT,
 };
 static const char* setting_names[SET_COUNT] = {
-    "Brightness", "Click strength", "Touch", "Bluetooth", "Calibrate", "Battery", "Version",
+    "Brightness", "Click strength", "Touch", "Auto off", "Bluetooth", "Calibrate", "Battery", "Version",
 };
+static const char* auto_off_names[] = {"5 min", "15 min", "30 min", "Never"};
+static const uint32_t auto_off_minutes[] = {5, 15, 30, 0};
+
+// Sleep: dim after a short pause, then screen off with the motor relaxed
+static const uint32_t SLEEP_DIM_MS = 30000;
+static const uint32_t SLEEP_SCREEN_OFF_MS = 120000;
+static const uint8_t SLEEP_DIM_PCT = 25;          // dimmed brightness, as a % of the normal setting
+static const float WAKE_TURN_DEGREES = 1.5f;      // turning this far counts as activity
 static const char* touch_mode_names[] = {"Track", "Follow", "Off"};
 
 // A screen inside Bluetooth (not in the Settings list itself)
@@ -521,6 +530,7 @@ void InterfaceTask::run() {
     while (1) {
         if (xQueueReceive(knob_state_queue_, &latest_state_, 0) == pdTRUE) {
             publishState();
+            checkKnobActivity();
             updateLiveSetting();
             #if SK_BLE
                 updateBleOutput();
@@ -568,6 +578,7 @@ void InterfaceTask::run() {
         #endif
 
         updateUsbPower();
+        updateSleep();
 
         #ifdef PIN_BATTERY_ADC
             updateBattery();
@@ -675,6 +686,11 @@ void InterfaceTask::updateHardware() {
     #endif
 
     uint16_t brightness = (uint32_t)UINT16_MAX * settings_.brightness_pct / 100;
+    if (sleep_stage_ == 1) {
+        brightness = (uint32_t)brightness * SLEEP_DIM_PCT / 100;
+    } else if (sleep_stage_ == 2) {
+        brightness = 0;
+    }
     // TODO: brightness scale factor should be configurable (depends on reflectivity of surface)
     #if SK_ALS
         brightness = (uint16_t)CLAMP(lux_avg * 13000, (float)1280, (float)UINT16_MAX);
@@ -735,6 +751,22 @@ void InterfaceTask::updateTouch() {
 
     uint16_t x = 0, y = 0;
     bool touching = touch_.read(x, y);
+
+    // A touch while the screen is off only wakes the knob
+    if (touching) {
+        if (sleep_stage_ == 2) {
+            swallow_touch_ = true;
+        }
+        noteActivity();
+    }
+    if (swallow_touch_) {
+        touch_gestures_.update(touching, x, y, now);
+        touch_gestures_.cancelCurrentTouch();
+        if (!touching) {
+            swallow_touch_ = false;
+        }
+        return;
+    }
 
     // Sliding around the rim acts like turning the knob
     float ring_delta = touch_ring_.update(touching, x, y);
@@ -960,6 +992,7 @@ void InterfaceTask::updatePowerButton() {
     ButtonEvent event = power_button_.update(digitalRead(PIN_POWER_BUTTON) == LOW, millis());
     switch (event) {
         case ButtonEvent::SHORT_PRESS:
+            noteActivity();
             log("Button: short press (no action yet)");
             break;
         case ButtonEvent::LONG_PRESS:
@@ -1199,6 +1232,14 @@ void InterfaceTask::openSetting(int item) {
             }
             config = makeListConfig("Touch", ui.item_count, settings_.touch_mode, ++nav_nonce_);
             break;
+        case SET_AUTO_OFF:
+            ui.layout = UiLayout::LIST;
+            ui.item_count = COUNT_OF(auto_off_names);
+            for (int i = 0; i < ui.item_count; i++) {
+                copyText(ui.items[i], auto_off_names[i]);
+            }
+            config = makeListConfig("Auto off", ui.item_count, settings_.auto_off, ++nav_nonce_);
+            break;
         case SET_BLUETOOTH:
             fillBluetoothList(ui);
             config = makeListConfig("Bluetooth", ui.item_count, 0, ++nav_nonce_);
@@ -1264,6 +1305,11 @@ void InterfaceTask::navSelect() {
                     applySettings();
                     saveSettings();
                     openSettingsList(SET_TOUCH);
+                    break;
+                case SET_AUTO_OFF:
+                    settings_.auto_off = CLAMP(sel, (int32_t)0, (int32_t)COUNT_OF(auto_off_names) - 1);
+                    saveSettings();
+                    openSettingsList(SET_AUTO_OFF);
                     break;
                 case SET_BLUETOOTH:
                     #if SK_BLE
@@ -1408,4 +1454,58 @@ void InterfaceTask::refreshBluetoothScreen() {
     ui.show_status = true;
     fillBluetoothList(ui);
     showUi(ui);
+}
+
+// ======================= Sleep =======================
+
+void InterfaceTask::noteActivity() {
+    last_activity_ms_ = millis();
+    auto_off_tried_ = false;
+    if (sleep_stage_ != 0) {
+        updateSleep();  // wake right away
+    }
+}
+
+void InterfaceTask::checkKnobActivity() {
+    // Turning the knob (more than a hair) counts as activity
+    float width_degrees = latest_state_.config.position_width_radians * 180 / PI;
+    float moved_degrees = fabsf((latest_state_.current_position - activity_position_)
+        + (latest_state_.sub_position_unit - activity_sub_position_)) * width_degrees;
+    if (moved_degrees >= WAKE_TURN_DEGREES) {
+        activity_position_ = latest_state_.current_position;
+        activity_sub_position_ = latest_state_.sub_position_unit;
+        if (sleep_stage_ == 2) {
+            #if SK_BLE
+                ble_last_config_ = -1;  // the turn that wakes it doesn't send anything
+            #endif
+        }
+        noteActivity();
+    }
+}
+
+void InterfaceTask::updateSleep() {
+    uint32_t now = millis();
+    uint32_t idle_ms = now - last_activity_ms_;
+    uint8_t stage = idle_ms >= SLEEP_SCREEN_OFF_MS ? 2 : (idle_ms >= SLEEP_DIM_MS ? 1 : 0);
+
+    if (stage != sleep_stage_) {
+        if (stage == 2) {
+            log("Sleep: screen off, knob relaxed");
+            motor_task_.setRelaxed(true);
+        } else if (sleep_stage_ == 2) {
+            log("Sleep: awake");
+            motor_task_.setRelaxed(false);
+        }
+        sleep_stage_ = stage;
+    }
+
+    // Auto off: only on battery (plugged into a computer it stays on)
+    uint32_t minutes = auto_off_minutes[CLAMP(settings_.auto_off, (uint8_t)0, (uint8_t)(COUNT_OF(auto_off_minutes) - 1))];
+    if (minutes > 0 && idle_ms >= minutes * 60000 && !usb_power_.connected() && !auto_off_tried_) {
+        auto_off_tried_ = true;  // don't keep retrying if it turns out USB is powering it
+        log("Sleep: idle too long, powering off");
+        #ifdef PIN_POWER_BUTTON
+            powerOff();
+        #endif
+    }
 }

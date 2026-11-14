@@ -298,7 +298,8 @@ void MotorTask::run() {
         }
 
         // Apply motor torque based on our angle to the nearest detent (detent strength, etc is handled by the PID_velocity parameters)
-        if (fabsf(motor.shaft_velocity) > 60) {
+        if (relaxed_ || fabsf(motor.shaft_velocity) > 60) {
+            // Relaxed (asleep), or spinning fast:
             // Don't apply torque if velocity is too high (helps avoid positive feedback loop/runaway)
             motor.move(0);
         } else {
@@ -339,6 +340,10 @@ void MotorTask::run() {
 
         delay(1);
     }
+}
+
+void MotorTask::setRelaxed(bool relaxed) {
+    relaxed_ = relaxed;
 }
 
 void MotorTask::setFollow(bool active, float delta_radians) {
