@@ -19,6 +19,22 @@ static MotorTask motor_task(1, config);
 InterfaceTask interface_task(0, motor_task, display_task_p);
 
 void setup() {
+  #ifdef PIN_POWER_HOLD
+  // MaTouch: hold the power latch on so the knob stays powered on battery.
+  // Mirrors Makerfabs' startup sequence (pins 18 high, 39 and 7 low).
+  pinMode(PIN_POWER_HOLD, OUTPUT);
+  digitalWrite(PIN_POWER_HOLD, HIGH);
+  delay(10);
+  #ifdef PIN_POWER_OFF_UP
+  pinMode(PIN_POWER_OFF_UP, OUTPUT);
+  digitalWrite(PIN_POWER_OFF_UP, LOW);
+  #endif
+  #ifdef PIN_POWER_OFF
+  pinMode(PIN_POWER_OFF, OUTPUT);
+  digitalWrite(PIN_POWER_OFF, LOW);
+  #endif
+  #endif
+
   #if SK_DISPLAY
   display_task.setLogger(&interface_task);
   display_task.begin();
