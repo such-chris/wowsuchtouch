@@ -12,6 +12,11 @@
 #include "serial/uart_stream.h"
 #include "task.h"
 
+#if SK_TOUCH
+#include "cst816s_touch.h"
+#include "touch_gestures.h"
+#endif
+
 #ifndef SK_FORCE_UART_STREAM
     #define SK_FORCE_UART_STREAM 0
 #endif
@@ -52,6 +57,12 @@ class InterfaceTask : public Task<InterfaceTask>, public Logger {
         bool remote_controlled_ = false;
         int current_config_ = 0;
         uint8_t press_count_ = 1;
+
+        #if SK_TOUCH
+        CST816STouch touch_;
+        TouchGestures touch_gestures_;
+        void updateTouch();
+        #endif
 
         PB_SmartKnobState latest_state_ = {};
         PB_SmartKnobConfig latest_config_ = {};

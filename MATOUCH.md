@@ -85,4 +85,22 @@ If the upload can't connect, use the Flash-button trick from step 3, then press 
 - `firmware/src/motor_task.h`: 3-signal motor driver when `SK_MOTOR_3PWM=1`
 - `firmware/src/main.cpp`: power latch at startup when `PIN_POWER_HOLD` is set
 
-Not done yet: touchscreen, the Function button, Bluetooth control of the Mac/iPad.
+- `firmware/src/cst816s_touch.*`: reads the touch chip (one finger, I2C address 0x15, pins 6/8)
+- `firmware/src/touch_gestures.*`: turns touches into gestures; tuning values at the top of `touch_gestures.h`
+- `firmware/src/interface_task.*`: what each gesture does (`updateTouch()`), when `SK_TOUCH=1`
+
+## Touch gestures
+
+Every gesture is printed in the monitor, e.g. `Touch: DOUBLE_TAP at (120, 98)`, so the monitor doubles as a touch test mode.
+
+| Gesture | Feel | Does |
+|---|---|---|
+| Tap | firm click | next mode |
+| Double tap | two firm clicks | nothing yet (reserved) |
+| Long press (~0.6 s) | firm click while still held | nothing yet (reserved) |
+| Swipe left / right | light click | next / previous mode |
+| Swipe up / down | none | nothing yet (reserved) |
+
+A single tap waits ~0.25 s to make sure it isn't the start of a double tap.
+
+Not done yet: the Function button, Bluetooth control of the Mac/iPad.

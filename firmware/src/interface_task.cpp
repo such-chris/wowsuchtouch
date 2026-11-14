@@ -261,6 +261,11 @@ void InterfaceTask::run() {
         Wire.begin(PIN_SDA, PIN_SCL);
         Wire.setClock(400000);
     #endif
+
+    #if SK_TOUCH
+        touch_.begin(PIN_TOUCH_SDA, PIN_TOUCH_SCL);
+    #endif
+
     #if SK_STRAIN
         scale.begin(PIN_STRAIN_DO, PIN_STRAIN_SCK);
     #endif
@@ -342,6 +347,10 @@ void InterfaceTask::run() {
         }
 
         updateHardware();
+
+        #if SK_TOUCH
+            updateTouch();
+        #endif
 
         if (!configuration_loaded_) {
             SemaphoreGuard lock(mutex_);
@@ -487,3 +496,62 @@ void InterfaceTask::applyConfig(PB_SmartKnobConfig& config, bool from_remote) {
     latest_config_ = config;
     motor_task_.setConfig(config);
 }
+
+#if SK_TOUCH
+void InterfaceTask::updateTouch() {
+    // Poll the touch chip every 10 ms
+    static uint32_t last_poll;
+    uint32_t now = millis();
+    if (now - last_poll < 10) {
+        return;
+    }
+    last_poll = now;
+
+    uint16_t x = 0, y = 0;
+    bool touching = touch_.read(x, y);
+    TouchGesture gesture = touch_gestures_.update(touching, x, y, now);
+    if (gesture == TouchGesture::NONE) {
+        return;
+    }
+
+    // Test mode: every gesture is printed in the serial monitor
+    snprintf(buf_, sizeof(buf_), "Touch: %s at (%d, %d)",
+        touchGestureName(gesture), touch_gestures_.gestureX(), touch_gestures_.gestureY());
+    log(buf_);
+
+    switch (gesture) {
+        case TouchGesture::TAP:
+            // Same as Scott's knob press: firm click + next mode
+            motor_task_.playHaptic(true);
+            if (!remote_controlled_) {
+                changeConfig(true);
+            }
+            break;
+        case TouchGesture::DOUBLE_TAP:
+            // Two firm clicks (action reserved for later)
+            motor_task_.playHaptic(true);
+            delay(80);
+            motor_task_.playHaptic(true);
+            break;
+        case TouchGesture::LONG_PRESS:
+            // Firm click while the finger is still down (action reserved for later)
+            motor_task_.playHaptic(true);
+            break;
+        case TouchGesture::SWIPE_LEFT:
+            motor_task_.playHaptic(false);
+            if (!remote_controlled_) {
+                changeConfig(true);
+            }
+            break;
+        case TouchGesture::SWIPE_RIGHT:
+            motor_task_.playHaptic(false);
+            if (!remote_controlled_) {
+                changeConfig(false);
+            }
+            break;
+        default:
+            // Swipe up/down: logged only, reserved for later
+            break;
+    }
+}
+#endif
