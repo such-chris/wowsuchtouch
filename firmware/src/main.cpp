@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <esp_system.h>
 
 #include "configuration.h"
 #include "display_task.h"
@@ -20,10 +21,23 @@ InterfaceTask interface_task(0, motor_task, display_task_p);
 
 void setup() {
   #ifdef PIN_POWER_HOLD
+  // Why did we start? Holding the Function button switches the knob on. Plugging
+  // in USB also powers it up; if that's the reason (a fresh power-up with the
+  // button not held) we show a charging screen instead, and don't hold the power
+  // on, so unplugging switches it straight back off. Restarts by the firmware
+  // itself (e.g. after "Forget all") always start normally.
+  bool charger_start = false;
+  #ifdef PIN_POWER_BUTTON
+  pinMode(PIN_POWER_BUTTON, INPUT_PULLUP);
+  bool button_held = digitalRead(PIN_POWER_BUTTON) == LOW;
+  charger_start = esp_reset_reason() == ESP_RST_POWERON && !button_held;
+  #endif
+  interface_task.setChargingMode(charger_start);
+
   // MaTouch: hold the power latch on so the knob stays powered on battery.
   // Mirrors Makerfabs' startup sequence (pins 18 high, 39 and 7 low).
   pinMode(PIN_POWER_HOLD, OUTPUT);
-  digitalWrite(PIN_POWER_HOLD, HIGH);
+  digitalWrite(PIN_POWER_HOLD, charger_start ? LOW : HIGH);
   delay(10);
   #ifdef PIN_POWER_OFF_UP
   pinMode(PIN_POWER_OFF_UP, OUTPUT);

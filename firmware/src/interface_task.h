@@ -52,6 +52,9 @@ class InterfaceTask : public Task<InterfaceTask>, public Logger {
         void log(const char* msg) override;
         void setConfiguration(Configuration* configuration);
 
+        // Started by a charger being plugged in: show the charging screen only
+        void setChargingMode(bool charging) { charging_mode_ = charging; }
+
     protected:
         void run();
 
@@ -150,6 +153,10 @@ class InterfaceTask : public Task<InterfaceTask>, public Logger {
         void noteActivity();
         void checkKnobActivity();
         void updateSleep();
+
+        bool charging_mode_ = false;
+        void showChargingScreen();
+        void leaveChargingMode();
         KnobSettings settings_;
         SettingsStore settings_store_;
 

@@ -449,8 +449,10 @@ void InterfaceTask::run() {
     #endif
 
     #if SK_BLE
+    if (!charging_mode_) {
         ble_.begin("SmartKnob");
         log("Bluetooth: pair with \"SmartKnob\" in your Mac's Bluetooth settings");
+    }
     #endif
 
     #if SK_STRAIN
@@ -472,7 +474,13 @@ void InterfaceTask::run() {
     #if SK_BLE
         ble_volume_level_ = CLAMP(settings_.volume, (int32_t)0, (int32_t)64);
     #endif
-    openApp(settings_.app < APP_COUNT ? settings_.app : 0);
+    if (charging_mode_) {
+        log("Started by a charger: charging screen (press the Function button to start)");
+        motor_task_.setRelaxed(true);
+        showChargingScreen();
+    } else {
+        openApp(settings_.app < APP_COUNT ? settings_.app : 0);
+    }
     sendStatus();
     motor_task_.addListener(knob_state_queue_);
 
@@ -752,6 +760,14 @@ void InterfaceTask::updateTouch() {
     uint16_t x = 0, y = 0;
     bool touching = touch_.read(x, y);
 
+    // Charging screen: touches just wake the display
+    if (charging_mode_) {
+        if (touching) {
+            noteActivity();
+        }
+        return;
+    }
+
     // A touch while the screen is off only wakes the knob
     if (touching) {
         if (sleep_stage_ == 2) {
@@ -992,10 +1008,18 @@ void InterfaceTask::updatePowerButton() {
     ButtonEvent event = power_button_.update(digitalRead(PIN_POWER_BUTTON) == LOW, millis());
     switch (event) {
         case ButtonEvent::SHORT_PRESS:
+            if (charging_mode_) {
+                leaveChargingMode();
+                break;
+            }
             noteActivity();
             log("Button: short press (no action yet)");
             break;
         case ButtonEvent::LONG_PRESS:
+            if (charging_mode_) {
+                leaveChargingMode();
+                break;
+            }
             powerOff();
             break;
         default:
@@ -1051,8 +1075,11 @@ void InterfaceTask::updateBattery() {
 
     // On battery the level can only go down; it may rise only while plugged in.
     // (Charging pushes the voltage up, so readings while plugged in run high.)
-    if (battery_pct_shown_ < 0 || usb_power_.connected() || pct < battery_pct_shown_) {
+    if (battery_pct_shown_ < 0 || usb_power_.connected() || charging_mode_ || pct < battery_pct_shown_) {
         battery_pct_shown_ = pct;
+    }
+    if (charging_mode_) {
+        showChargingScreen();
     }
 
     if (last_log == 0 || now - last_log >= 30000) {
@@ -1064,7 +1091,7 @@ void InterfaceTask::updateBattery() {
     sendStatus();
 
     // Warn once when it gets low; warn again only after it has been charged back up
-    if (!usb_power_.connected() && battery_pct_shown_ <= 15 && !battery_low_warned_) {
+    if (!usb_power_.connected() && !charging_mode_ && battery_pct_shown_ <= 15 && !battery_low_warned_) {
         battery_low_warned_ = true;
         toast(LV_SYMBOL_BATTERY_1 " Battery low");
     } else if (battery_pct_shown_ >= 25) {
@@ -1494,18 +1521,54 @@ void InterfaceTask::updateSleep() {
             motor_task_.setRelaxed(true);
         } else if (sleep_stage_ == 2) {
             log("Sleep: awake");
-            motor_task_.setRelaxed(false);
+            motor_task_.setRelaxed(charging_mode_);  // stays relaxed on the charging screen
         }
         sleep_stage_ = stage;
     }
 
     // Auto off: only on battery (plugged into a computer it stays on)
     uint32_t minutes = auto_off_minutes[CLAMP(settings_.auto_off, (uint8_t)0, (uint8_t)(COUNT_OF(auto_off_minutes) - 1))];
-    if (minutes > 0 && idle_ms >= minutes * 60000 && !usb_power_.connected() && !auto_off_tried_) {
+    if (minutes > 0 && idle_ms >= minutes * 60000 && !usb_power_.connected() && !charging_mode_ && !auto_off_tried_) {
         auto_off_tried_ = true;  // don't keep retrying if it turns out USB is powering it
         log("Sleep: idle too long, powering off");
         #ifdef PIN_POWER_BUTTON
             powerOff();
         #endif
     }
+}
+
+// ======================= Charging screen =======================
+
+void InterfaceTask::showChargingScreen() {
+    UiScreen ui;
+    ui.layout = UiLayout::VALUE;
+    copyText(ui.title, "Charging");
+    int8_t pct = -1;
+    #ifdef PIN_BATTERY_ADC
+        pct = battery_pct_shown_;
+    #endif
+    if (pct >= 99) {
+        copyText(ui.line1, LV_SYMBOL_CHARGE " Charged");
+    } else if (pct >= 0) {
+        snprintf(ui.line1, UI_TEXT_LEN, LV_SYMBOL_CHARGE " %d%%", pct);
+    } else {
+        copyText(ui.line1, LV_SYMBOL_CHARGE);
+    }
+    copyText(ui.line2, "Button: start");
+    showUi(ui);
+
+    // Nothing to turn: hold nothing (the motor is relaxed anyway)
+    if (strcmp(latest_config_.text, "Charging") != 0) {
+        PB_SmartKnobConfig config = makeStillConfig("Charging", ++nav_nonce_);
+        applyConfig(config, false);
+    }
+}
+
+void InterfaceTask::leaveChargingMode() {
+    // Restart into normal use. A restart by the firmware itself always starts
+    // normally and holds the power on, so it keeps running if unplugged later.
+    log("Starting up from the charging screen");
+    saveSettings();
+    delay(100);
+    ESP.restart();
 }
