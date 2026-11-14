@@ -5,6 +5,7 @@
 #include <BleCompositeHID.h>
 #include <KeyboardDevice.h>
 #include <MouseDevice.h>
+#include <NimBLEDevice.h>
 #include <stdlib.h>
 
 // Most key repeats sent for one update, so a fast spin can't flood the connection
@@ -85,6 +86,10 @@ void BleOutput::arrowSteps(int32_t steps) {
     for (int32_t i = 0; i < abs(steps); i++) {
         tapKey(key);
     }
+}
+
+void BleOutput::forgetAllDevices() {
+    NimBLEDevice::deleteAllBonds();
 }
 
 #endif // SK_BLE

@@ -18,6 +18,9 @@ class BleOutput {
         void scrollSteps(int32_t steps);             // mouse wheel ticks
         void arrowSteps(int32_t steps);              // right / left arrow keys
 
+        // Forget every paired Mac/iPad (they'll need to pair again)
+        void forgetAllDevices();
+
     private:
         void tapMediaKey(uint32_t media_key, uint8_t modifiers);
         void tapKey(uint8_t key);

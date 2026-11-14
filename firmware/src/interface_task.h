@@ -15,6 +15,8 @@
 #include "serial/serial_protocol_protobuf.h"
 #include "serial/uart_stream.h"
 #include "task.h"
+#include "settings_store.h"
+#include "ui_screen.h"
 
 #if SK_TOUCH
 #include "cst816s_touch.h"
@@ -82,8 +84,8 @@ class InterfaceTask : public Task<InterfaceTask>, public Logger {
         TouchRing touch_ring_;
         RingStepper ring_stepper_;
 
-        // How sliding around the rim behaves (triple tap switches)
-        enum class RingMode { TRACK, FOLLOW };
+        // How sliding around the rim behaves (Settings > Touch)
+        enum class RingMode { TRACK, FOLLOW, OFF };
         RingMode ring_mode_ = RingMode::TRACK;
         bool ring_was_active_ = false;
         bool ring_is_slide_ = false;  // moved far enough to count as a slide, not a tap
@@ -124,6 +126,30 @@ class InterfaceTask : public Task<InterfaceTask>, public Logger {
         SerialProtocolProtobuf proto_protocol_;
 
         void changeConfig(bool next);
+
+        // ---- Navigation: apps, the apps list and settings ----
+        enum class NavScreen { APP, APPS_LIST, SETTINGS_LIST, SETTING };
+        NavScreen nav_screen_ = NavScreen::APP;
+        int current_app_ = 0;      // index into apps[]
+        int open_setting_ = 0;     // which setting is open (SETTING screen)
+        uint8_t nav_nonce_ = 0;    // makes the motor apply each new menu position
+        KnobSettings settings_;
+        SettingsStore settings_store_;
+
+        void setNavScreen(NavScreen screen);
+        void showUi(const UiScreen& screen);
+        void goHome();
+        void openApp(int app);
+        void applyAppPage();
+        void openAppsList();
+        void openSettingsList(int selected);
+        void openSetting(int item);
+        void navSelect();   // tap in a menu
+        void navBack();     // double tap in a menu
+        void updateLiveSetting();  // sliders that apply while you turn
+        int32_t selectedIndex();
+        void applySettings();
+        void saveSettings();
         void updateHardware();
         void publishState();
         void applyConfig(PB_SmartKnobConfig& config, bool from_remote);

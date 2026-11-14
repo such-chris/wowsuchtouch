@@ -13,6 +13,7 @@
 #include "interface_task.h"
 #include "semaphore_guard.h"
 #include "util.h"
+#include "version.h"
 
 #if SK_LEDS
 CRGB leds[NUM_LEDS];
@@ -289,6 +290,83 @@ static PB_SmartKnobConfig configs[] = {
     },
 };
 
+// ---- Apps: each app is a group of modes (pages) from configs[] above ----
+struct AppDef {
+    const char* name;
+    int first_config;   // index of its first page in configs[]
+    int config_count;   // how many pages
+};
+#if SK_BLE
+static const int MAC_PAGE_COUNT = COUNT_OF(ble_mode_outputs);
+static const AppDef apps[] = {
+    {"Mac", 0, MAC_PAGE_COUNT},                                      // Volume, Scroll, Arrows
+    {"Demo", MAC_PAGE_COUNT, (int)COUNT_OF(configs) - MAC_PAGE_COUNT},  // Scott's haptic demos
+};
+#else
+static const AppDef apps[] = {
+    {"Demo", 0, (int)COUNT_OF(configs)},
+};
+#endif
+static const int APP_COUNT = COUNT_OF(apps);
+
+// ---- Settings list ----
+enum SettingItem {
+    SET_BRIGHTNESS,
+    SET_HAPTICS,
+    SET_TOUCH,
+    SET_BLUETOOTH,
+    SET_CALIBRATE,
+    SET_BATTERY,
+    SET_VERSION,
+    SET_COUNT,
+};
+static const char* setting_names[SET_COUNT] = {
+    "Brightness", "Haptics", "Touch", "Bluetooth", "Calibrate", "Battery", "Version",
+};
+static const char* touch_mode_names[] = {"Track", "Follow", "Off"};
+
+// How far from the top / bottom edge a swipe must start to open Settings / Apps (pixels)
+static const uint16_t EDGE_SWIPE_PX = 60;
+
+// ---- Knob feel for menus ----
+// A list: one firm click per item, end stops at the first and last item
+static PB_SmartKnobConfig makeListConfig(const char* id, int count, int selected, uint8_t nonce) {
+    PB_SmartKnobConfig config = {};
+    config.position = selected;
+    config.position_nonce = nonce;
+    config.min_position = 0;
+    config.max_position = count - 1;
+    config.position_width_radians = 24 * PI / 180;
+    config.detent_strength_unit = 1.5;
+    config.endstop_strength_unit = 1;
+    config.snap_point = 1.1;
+    strncpy(config.text, id, sizeof(config.text) - 1);
+    return config;
+}
+
+// A slider: light clicks between min and max
+static PB_SmartKnobConfig makeSliderConfig(const char* id, int min, int max, int value, uint8_t nonce) {
+    PB_SmartKnobConfig config = makeListConfig(id, max - min + 1, value, nonce);
+    config.min_position = min;
+    config.max_position = max;
+    config.position = CLAMP(value, min, max);
+    config.position_width_radians = 10 * PI / 180;
+    config.detent_strength_unit = 0.7;
+    return config;
+}
+
+// Nothing to turn: the knob is gently held in place
+static PB_SmartKnobConfig makeStillConfig(const char* id, uint8_t nonce) {
+    PB_SmartKnobConfig config = makeListConfig(id, 1, 0, nonce);
+    config.endstop_strength_unit = 0.5;
+    return config;
+}
+
+static void copyText(char* dest, const char* src) {
+    strncpy(dest, src, UI_TEXT_LEN - 1);
+    dest[UI_TEXT_LEN - 1] = 0;
+}
+
 InterfaceTask::InterfaceTask(const uint8_t task_core, MotorTask& motor_task, DisplayTask* display_task) : 
         // Bluetooth sends happen on this task, so give it more stack room when enabled
         Task("Interface", SK_BLE ? 6000 : 3400, 1, task_core),
@@ -358,7 +436,13 @@ void InterfaceTask::run() {
         }
     #endif
 
-    applyConfig(configs[0], false);
+    // Restore saved settings and open the last-used app
+    settings_ = settings_store_.load();
+    applySettings();
+    #if SK_BLE
+        ble_volume_level_ = CLAMP(settings_.volume, (int32_t)0, (int32_t)64);
+    #endif
+    openApp(settings_.app < APP_COUNT ? settings_.app : 0);
     motor_task_.addListener(knob_state_queue_);
 
     plaintext_protocol_.init([this] () {
@@ -415,6 +499,7 @@ void InterfaceTask::run() {
     while (1) {
         if (xQueueReceive(knob_state_queue_, &latest_state_, 0) == pdTRUE) {
             publishState();
+            updateLiveSetting();
             #if SK_BLE
                 updateBleOutput();
             #endif
@@ -463,26 +548,15 @@ void InterfaceTask::log(const char* msg) {
 }
 
 void InterfaceTask::changeConfig(bool next) {
-    if (next) {
-        current_config_ = (current_config_ + 1) % COUNT_OF(configs);
-    } else {
-        if (current_config_ == 0) {
-            current_config_ = COUNT_OF(configs) - 1;
-        } else {
-            current_config_ --;
-        }
+    // Next / previous page within the current app (wraps around)
+    if (nav_screen_ != NavScreen::APP) {
+        return;
     }
-    
-    #if SK_BLE
-        // Volume picks up where it was last left
-        if (current_config_ < (int)COUNT_OF(ble_mode_outputs) && ble_mode_outputs[current_config_] == KnobOutput::VOLUME) {
-            configs[current_config_].position = ble_volume_level_;
-        }
-    #endif
-
-    snprintf(buf_, sizeof(buf_), "Changing config to %d -- %s", current_config_, configs[current_config_].text);
-    log(buf_);
-    applyConfig(configs[current_config_], false);
+    const AppDef& app = apps[current_app_];
+    int page = current_config_ - app.first_config;
+    page = (page + (next ? 1 : -1) + app.config_count) % app.config_count;
+    current_config_ = app.first_config + page;
+    applyAppPage();
 }
 
 void InterfaceTask::updateHardware() {
@@ -554,7 +628,7 @@ void InterfaceTask::updateHardware() {
         }
     #endif
 
-    uint16_t brightness = UINT16_MAX;
+    uint16_t brightness = (uint32_t)UINT16_MAX * settings_.brightness_pct / 100;
     // TODO: brightness scale factor should be configurable (depends on reflectivity of surface)
     #if SK_ALS
         brightness = (uint16_t)CLAMP(lux_avg * 13000, (float)1280, (float)UINT16_MAX);
@@ -591,7 +665,13 @@ void InterfaceTask::publishState() {
 void InterfaceTask::applyConfig(PB_SmartKnobConfig& config, bool from_remote) {
     remote_controlled_ = from_remote;
     latest_config_ = config;
-    motor_task_.setConfig(config);
+
+    // Settings > Haptics scales every click and end stop
+    PB_SmartKnobConfig scaled = config;
+    float strength = settings_.haptics_pct / 100.0f;
+    scaled.detent_strength_unit *= strength;
+    scaled.endstop_strength_unit *= strength;
+    motor_task_.setConfig(scaled);
 }
 
 #if SK_TOUCH
@@ -612,7 +692,7 @@ void InterfaceTask::updateTouch() {
 
     // Sliding around the rim acts like turning the knob
     float ring_delta = touch_ring_.update(touching, x, y);
-    if (touch_ring_.active()) {
+    if (touch_ring_.active() && ring_mode_ != RingMode::OFF) {
         if (!ring_was_active_) {
             // Finger just arrived on the rim
             ring_was_active_ = true;
@@ -682,51 +762,60 @@ void InterfaceTask::updateTouch() {
         touchGestureName(gesture), touch_gestures_.gestureX(), touch_gestures_.gestureY());
     log(buf_);
 
+    // These work everywhere: edge swipes open Settings / Apps, long press goes Home
+    uint16_t start_y = touch_gestures_.gestureY();
+    if (gesture == TouchGesture::SWIPE_DOWN && start_y < EDGE_SWIPE_PX) {
+        motor_task_.playHaptic(false);
+        openSettingsList(0);
+        return;
+    }
+    if (gesture == TouchGesture::SWIPE_UP && start_y > TFT_HEIGHT - EDGE_SWIPE_PX) {
+        motor_task_.playHaptic(false);
+        openAppsList();
+        return;
+    }
+    if (gesture == TouchGesture::LONG_PRESS) {
+        motor_task_.playHaptic(true);  // felt while the finger is still down
+        goHome();
+        return;
+    }
+
+    if (nav_screen_ != NavScreen::APP) {
+        // In a menu: tap opens / chooses, double tap goes back
+        if (gesture == TouchGesture::TAP) {
+            motor_task_.playHaptic(true);
+            navSelect();
+        } else if (gesture == TouchGesture::DOUBLE_TAP) {
+            motor_task_.playHaptic(true);
+            delay(80);
+            motor_task_.playHaptic(true);
+            navBack();
+        }
+        return;
+    }
+
+    // In an app: tap / swipe left = next page, double tap / swipe right = previous page
     switch (gesture) {
         case TouchGesture::TAP:
-            // Same as Scott's knob press: firm click + next mode
             motor_task_.playHaptic(true);
-            if (!remote_controlled_) {
-                changeConfig(true);
-            }
+            changeConfig(true);
             break;
         case TouchGesture::DOUBLE_TAP:
-            // Two firm clicks + previous mode
             motor_task_.playHaptic(true);
             delay(80);
             motor_task_.playHaptic(true);
-            if (!remote_controlled_) {
-                changeConfig(false);
-            }
-            break;
-        case TouchGesture::TRIPLE_TAP:
-            // Three firm clicks + switch how the rim slider behaves
-            motor_task_.playHaptic(true);
-            delay(80);
-            motor_task_.playHaptic(true);
-            delay(80);
-            motor_task_.playHaptic(true);
-            ring_mode_ = ring_mode_ == RingMode::TRACK ? RingMode::FOLLOW : RingMode::TRACK;
-            log(ring_mode_ == RingMode::TRACK ? "Ring mode: TRACK (value follows finger)" : "Ring mode: FOLLOW (knob turns with finger)");
-            break;
-        case TouchGesture::LONG_PRESS:
-            // Firm click while the finger is still down (action reserved for later)
-            motor_task_.playHaptic(true);
+            changeConfig(false);
             break;
         case TouchGesture::SWIPE_LEFT:
             motor_task_.playHaptic(false);
-            if (!remote_controlled_) {
-                changeConfig(true);
-            }
+            changeConfig(true);
             break;
         case TouchGesture::SWIPE_RIGHT:
             motor_task_.playHaptic(false);
-            if (!remote_controlled_) {
-                changeConfig(false);
-            }
+            changeConfig(false);
             break;
         default:
-            // Swipe up/down: logged only, reserved for later
+            // Triple tap, and swipes up/down away from the edges: free for app-specific actions
             break;
     }
 }
@@ -735,6 +824,7 @@ void InterfaceTask::updateTouch() {
 #if SK_BLE
 bool InterfaceTask::inBleMode(int output) {
     return !remote_controlled_
+        && nav_screen_ == NavScreen::APP
         && current_config_ < (int)COUNT_OF(ble_mode_outputs)
         && (int)ble_mode_outputs[current_config_] == output;
 }
@@ -829,6 +919,7 @@ void InterfaceTask::updatePowerButton() {
 }
 
 void InterfaceTask::powerOff() {
+    saveSettings();
     log("Powering off... release the button");
     motor_task_.playHaptic(true);
     delay(150);
@@ -873,3 +964,259 @@ void InterfaceTask::updateBattery() {
     log(buf_);
 }
 #endif
+
+// ======================= Navigation =======================
+
+void InterfaceTask::showUi(const UiScreen& screen) {
+    #if SK_DISPLAY
+        if (display_task_ != nullptr) {
+            display_task_->showScreen(screen);
+        }
+    #endif
+}
+
+void InterfaceTask::setNavScreen(NavScreen screen) {
+    if (nav_screen_ == NavScreen::APP && screen != NavScreen::APP) {
+        saveSettings();  // remembers the volume level and app
+    }
+    nav_screen_ = screen;
+    #if SK_BLE
+        ble_last_config_ = -1;  // start fresh when an app is shown again, so nothing is sent by mistake
+    #endif
+}
+
+int32_t InterfaceTask::selectedIndex() {
+    // The knob's position is the highlighted item, once the motor has switched to this menu
+    if (strcmp(latest_state_.config.text, latest_config_.text) != 0) {
+        return latest_config_.position;
+    }
+    return latest_state_.current_position;
+}
+
+void InterfaceTask::goHome() {
+    openApp(0);
+}
+
+void InterfaceTask::openApp(int app) {
+    current_app_ = CLAMP(app, 0, APP_COUNT - 1);
+    settings_.app = current_app_;
+    setNavScreen(NavScreen::APP);
+    const AppDef& def = apps[current_app_];
+    if (current_config_ < def.first_config || current_config_ >= def.first_config + def.config_count) {
+        current_config_ = def.first_config;
+    }
+    applyAppPage();
+}
+
+void InterfaceTask::applyAppPage() {
+    UiScreen ui;
+    ui.layout = UiLayout::CONTROL;
+    showUi(ui);
+
+    #if SK_BLE
+        // Volume picks up where it was last left
+        if (current_config_ < (int)COUNT_OF(ble_mode_outputs) && ble_mode_outputs[current_config_] == KnobOutput::VOLUME) {
+            configs[current_config_].position = ble_volume_level_;
+        }
+    #endif
+    configs[current_config_].position_nonce = ++nav_nonce_;
+
+    snprintf(buf_, sizeof(buf_), "%s: %s", apps[current_app_].name, configs[current_config_].text);
+    log(buf_);
+    applyConfig(configs[current_config_], false);
+}
+
+void InterfaceTask::openAppsList() {
+    setNavScreen(NavScreen::APPS_LIST);
+    UiScreen ui;
+    ui.layout = UiLayout::LIST;
+    copyText(ui.title, "Apps");
+    ui.item_count = APP_COUNT;
+    for (int i = 0; i < APP_COUNT; i++) {
+        copyText(ui.items[i], apps[i].name);
+    }
+    showUi(ui);
+    PB_SmartKnobConfig config = makeListConfig("Apps", APP_COUNT, current_app_, ++nav_nonce_);
+    applyConfig(config, false);
+}
+
+void InterfaceTask::openSettingsList(int selected) {
+    setNavScreen(NavScreen::SETTINGS_LIST);
+    UiScreen ui;
+    ui.layout = UiLayout::LIST;
+    copyText(ui.title, "Settings");
+    ui.item_count = SET_COUNT;
+    for (int i = 0; i < SET_COUNT; i++) {
+        copyText(ui.items[i], setting_names[i]);
+    }
+    showUi(ui);
+    PB_SmartKnobConfig config = makeListConfig("Settings", SET_COUNT, selected, ++nav_nonce_);
+    applyConfig(config, false);
+}
+
+void InterfaceTask::openSetting(int item) {
+    setNavScreen(NavScreen::SETTING);
+    open_setting_ = item;
+
+    UiScreen ui;
+    copyText(ui.title, setting_names[item]);
+    PB_SmartKnobConfig config;
+
+    switch (item) {
+        case SET_BRIGHTNESS:
+            // 10-100% in steps of 5
+            ui.layout = UiLayout::VALUE;
+            ui.show_number = true;
+            ui.number_multiplier = 5;
+            copyText(ui.suffix, "%");
+            config = makeSliderConfig("Brightness", 2, 20, settings_.brightness_pct / 5, ++nav_nonce_);
+            break;
+        case SET_HAPTICS:
+            // 20-200% in steps of 10; takes effect when you leave
+            ui.layout = UiLayout::VALUE;
+            ui.show_number = true;
+            ui.number_multiplier = 10;
+            copyText(ui.suffix, "%");
+            config = makeSliderConfig("Haptics", 2, 20, settings_.haptics_pct / 10, ++nav_nonce_);
+            break;
+        case SET_TOUCH:
+            ui.layout = UiLayout::LIST;
+            ui.item_count = COUNT_OF(touch_mode_names);
+            for (int i = 0; i < ui.item_count; i++) {
+                copyText(ui.items[i], touch_mode_names[i]);
+            }
+            config = makeListConfig("Touch", ui.item_count, settings_.touch_mode, ++nav_nonce_);
+            break;
+        case SET_BLUETOOTH: {
+            bool connected = false;
+            #if SK_BLE
+                connected = ble_.isConnected();
+            #endif
+            ui.layout = UiLayout::LIST;
+            ui.item_count = 2;
+            copyText(ui.items[0], connected ? "Connected" : "Not connected");
+            copyText(ui.items[1], "Forget all");
+            config = makeListConfig("Bluetooth", 2, 0, ++nav_nonce_);
+            break;
+        }
+        case SET_CALIBRATE:
+            ui.layout = UiLayout::VALUE;
+            copyText(ui.line1, "Hands off");
+            copyText(ui.line2, "Tap to start");
+            config = makeStillConfig("Calibrate", ++nav_nonce_);
+            break;
+        case SET_BATTERY:
+            ui.layout = UiLayout::VALUE;
+            #ifdef PIN_BATTERY_ADC
+                if (battery_mv_ > 0) {
+                    snprintf(ui.line1, UI_TEXT_LEN, "%.2f V", battery_mv_ / 1000.0f);
+                    snprintf(ui.line2, UI_TEXT_LEN, "about %d%%", batteryPercentFromMillivolts(battery_mv_));
+                } else {
+                    copyText(ui.line1, "Reading...");
+                }
+            #else
+                copyText(ui.line1, "No battery sensor");
+            #endif
+            config = makeStillConfig("Battery", ++nav_nonce_);
+            break;
+        default:  // SET_VERSION
+            ui.layout = UiLayout::VALUE;
+            copyText(ui.line1, FIRMWARE_VERSION);
+            copyText(ui.line2, "MaTouch Knob");
+            config = makeStillConfig("Version", ++nav_nonce_);
+            break;
+    }
+
+    showUi(ui);
+    applyConfig(config, false);
+}
+
+void InterfaceTask::navSelect() {
+    int32_t sel = selectedIndex();
+    switch (nav_screen_) {
+        case NavScreen::APPS_LIST:
+            openApp(sel);
+            break;
+        case NavScreen::SETTINGS_LIST:
+            openSetting(CLAMP(sel, (int32_t)0, (int32_t)SET_COUNT - 1));
+            break;
+        case NavScreen::SETTING:
+            switch (open_setting_) {
+                case SET_TOUCH:
+                    settings_.touch_mode = CLAMP(sel, (int32_t)0, (int32_t)2);
+                    applySettings();
+                    saveSettings();
+                    openSettingsList(SET_TOUCH);
+                    break;
+                case SET_BLUETOOTH:
+                    if (sel == 1) {
+                        #if SK_BLE
+                            log("Bluetooth: forgetting all devices and restarting");
+                            ble_.forgetAllDevices();
+                            saveSettings();
+                            delay(200);
+                            ESP.restart();
+                        #endif
+                    }
+                    break;
+                case SET_CALIBRATE:
+                    log("Calibrating: hands off the knob");
+                    motor_task_.runCalibration();
+                    openApp(current_app_);  // the app's feel is restored once calibration finishes
+                    break;
+                default:
+                    // Sliders and info screens: tap = done
+                    navBack();
+                    break;
+            }
+            break;
+        default:
+            break;
+    }
+}
+
+void InterfaceTask::navBack() {
+    switch (nav_screen_) {
+        case NavScreen::SETTING:
+            if (open_setting_ == SET_HAPTICS) {
+                applySettings();  // new strength takes effect from here on
+            }
+            saveSettings();
+            openSettingsList(open_setting_);
+            break;
+        case NavScreen::APPS_LIST:
+        case NavScreen::SETTINGS_LIST:
+            openApp(current_app_);
+            break;
+        default:
+            break;
+    }
+}
+
+void InterfaceTask::updateLiveSetting() {
+    // Sliders store their value as you turn (brightness changes immediately)
+    if (nav_screen_ != NavScreen::SETTING || strcmp(latest_state_.config.text, latest_config_.text) != 0) {
+        return;
+    }
+    int32_t position = latest_state_.current_position;
+    if (open_setting_ == SET_BRIGHTNESS) {
+        settings_.brightness_pct = CLAMP(position, (int32_t)2, (int32_t)20) * 5;
+    } else if (open_setting_ == SET_HAPTICS) {
+        settings_.haptics_pct = CLAMP(position, (int32_t)2, (int32_t)20) * 10;
+    }
+}
+
+void InterfaceTask::applySettings() {
+    #if SK_TOUCH
+        RingMode modes[] = {RingMode::TRACK, RingMode::FOLLOW, RingMode::OFF};
+        ring_mode_ = modes[CLAMP(settings_.touch_mode, (uint8_t)0, (uint8_t)2)];
+    #endif
+    // Brightness is applied every loop in updateHardware(); haptics in applyConfig()
+}
+
+void InterfaceTask::saveSettings() {
+    #if SK_BLE
+        settings_.volume = ble_volume_level_;
+    #endif
+    settings_store_.save(settings_);
+}

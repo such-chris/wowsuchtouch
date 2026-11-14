@@ -96,25 +96,36 @@ If the upload can't connect, use the Flash-button trick from step 3, then press 
 
 Every gesture is printed in the monitor, e.g. `Touch: DOUBLE_TAP at (120, 98)`, so the monitor doubles as a touch test mode.
 
-| Gesture | Feel | Does |
+| Gesture | Where | Does |
 |---|---|---|
-| Tap | firm click | next mode |
-| Double tap | two firm clicks | previous mode |
-| Triple tap | three firm clicks | switch rim mode: TRACK / FOLLOW |
-| Long press (~0.6 s) | firm click while still held | nothing yet (reserved) |
-| Swipe left / right | light click | next / previous mode |
-| Swipe up / down | none | nothing yet (reserved) |
-| Slide around the rim | TRACK: light click per detent, firm bump at limits | acts like turning the knob (see below) |
+| Swipe down from the top edge | anywhere | Settings |
+| Swipe up from the bottom edge | anywhere | Apps |
+| Long press (~0.6 s) | anywhere | Home (the Mac app) |
+| Tap / swipe left | in an app | next page (e.g. Volume -> Scroll) |
+| Double tap / swipe right | in an app | previous page |
+| Turn the knob | in a menu | move through the list (one click per item) |
+| Tap | in a menu | open / choose |
+| Double tap | in a menu | back |
+| Slide around the rim | anywhere | acts like turning the knob (Settings > Touch) |
 
 Single and double taps wait ~0.25 s to make sure another tap isn't coming.
 
 Rim slider: a touch in the outer band of the screen (more than 75 px from center) becomes a slide
 after ~4 degrees of travel; less than that still counts as a tap. Clockwise raises the value.
 
-- **TRACK** (default): the value changes exactly as if you'd turned the knob the same angle, using the
+- **Track** (default): the value changes exactly as if you'd turned the knob the same angle, using the
   current mode's detent spacing, limits and clicks (`ring_stepper.*`).
-- **FOLLOW**: the motor turns the knob to follow your finger. Tuning: `FOLLOW_P`, `FOLLOW_D`,
+- **Follow**: the motor turns the knob to follow your finger. Tuning: `FOLLOW_P`, `FOLLOW_D`,
   `FOLLOW_LIMIT` at the top of `firmware/src/motor_task.cpp`.
+
+## Apps and settings
+
+- **Apps:** Mac (Volume, Scroll, Arrows) and Demo (Scott's haptic behaviors). Home = Mac.
+- **Settings:** Brightness (10-100%), Haptics (20-200%, applies when you leave), Touch (rim: Track /
+  Follow / Off), Bluetooth (status, Forget all), Calibrate, Battery, Version.
+- Saved on the knob (ESP32 Preferences): brightness, haptics, touch mode, Volume level, last app.
+- Code: navigation section at the end of `interface_task.cpp`; layouts in `display_task.cpp`
+  (`UiScreen` in `ui_screen.h`); storage in `settings_store.*`; version in `version.h`.
 
 ## Bluetooth (Mac / iPad)
 

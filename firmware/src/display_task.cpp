@@ -14,6 +14,7 @@ static const int32_t DOT_SIZE = 14;
 static const uint32_t COLOR_ACCENT = 0x5064C8;    // blue-violet, from Scott's dot
 static const uint32_t COLOR_TRACK = 0x2A2A33;
 static const uint32_t COLOR_TEXT_DIM = 0x9A9AA8;
+static const uint32_t COLOR_TEXT_FAINT = 0x4A4A55;
 
 // LVGL draws into this buffer a strip at a time; each strip is then sent to the screen.
 // 24 rows: 240 x 24 pixels x 2 bytes = 11.5 KB
@@ -47,12 +48,16 @@ DisplayTask::DisplayTask(const uint8_t task_core) : Task{"Display", 8192, 1, tas
     knob_state_queue_ = xQueueCreate(1, sizeof(PB_SmartKnobState));
     assert(knob_state_queue_ != NULL);
 
+    ui_screen_queue_ = xQueueCreate(1, sizeof(UiScreen));
+    assert(ui_screen_queue_ != NULL);
+
     mutex_ = xSemaphoreCreateMutex();
     assert(mutex_ != NULL);
 }
 
 DisplayTask::~DisplayTask() {
     vQueueDelete(knob_state_queue_);
+    vQueueDelete(ui_screen_queue_);
     vSemaphoreDelete(mutex_);
 }
 
@@ -74,12 +79,16 @@ void DisplayTask::run() {
     lv_display_set_buffers(display, draw_buffer, NULL, sizeof(draw_buffer), LV_DISPLAY_RENDER_MODE_PARTIAL);
 
     buildScreen();
+    applyLayout();
     log("Display: LVGL running");
 
-    PB_SmartKnobState state;
     while (1) {
-        if (xQueueReceive(knob_state_queue_, &state, 0) == pdTRUE) {
-            updateScreen(state);
+        if (xQueueReceive(ui_screen_queue_, &ui_, 0) == pdTRUE) {
+            applyLayout();
+            updateScreen(last_state_);
+        }
+        if (xQueueReceive(knob_state_queue_, &last_state_, 0) == pdTRUE) {
+            updateScreen(last_state_);
         }
 
         lv_timer_handler();  // LVGL redraws whatever changed
@@ -139,6 +148,69 @@ void DisplayTask::buildScreen() {
     lv_obj_set_style_text_align(text_label_, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(text_label_, LV_ALIGN_CENTER, 0, 40);
     lv_label_set_text(text_label_, "");
+
+    // Heading for lists and settings
+    title_label_ = lv_label_create(screen);
+    lv_obj_set_style_text_font(title_label_, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(title_label_, lv_color_hex(COLOR_TEXT_DIM), 0);
+    lv_obj_align(title_label_, LV_ALIGN_TOP_MID, 0, 34);
+    lv_label_set_text(title_label_, "");
+
+    // List: selected item big in the middle, neighbours dimmed above and below
+    list_prev_ = lv_label_create(screen);
+    lv_obj_set_style_text_font(list_prev_, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(list_prev_, lv_color_hex(COLOR_TEXT_FAINT), 0);
+    lv_obj_align(list_prev_, LV_ALIGN_CENTER, 0, -46);
+
+    list_sel_ = lv_label_create(screen);
+    lv_obj_set_style_text_font(list_sel_, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(list_sel_, lv_color_white(), 0);
+    lv_obj_align(list_sel_, LV_ALIGN_CENTER, 0, 0);
+
+    list_next_ = lv_label_create(screen);
+    lv_obj_set_style_text_font(list_next_, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(list_next_, lv_color_hex(COLOR_TEXT_FAINT), 0);
+    lv_obj_align(list_next_, LV_ALIGN_CENTER, 0, 46);
+
+    // Value layout: two lines of info under the heading
+    info_label_ = lv_label_create(screen);
+    lv_obj_set_style_text_font(info_label_, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(info_label_, lv_color_white(), 0);
+    lv_obj_set_style_text_align(info_label_, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(info_label_, LV_ALIGN_CENTER, 0, 6);
+}
+
+static void setVisible(lv_obj_t* obj, bool visible) {
+    if (visible) {
+        lv_obj_remove_flag(obj, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+// Show the pieces the current layout uses and hide the rest
+void DisplayTask::applyLayout() {
+    bool control = ui_.layout == UiLayout::CONTROL;
+    bool list = ui_.layout == UiLayout::LIST;
+    bool value = ui_.layout == UiLayout::VALUE;
+
+    setVisible(text_label_, control);
+    setVisible(value_label_, control || (value && ui_.show_number));
+    setVisible(title_label_, list || value);
+    setVisible(list_prev_, list);
+    setVisible(list_sel_, list);
+    setVisible(list_next_, list);
+    setVisible(info_label_, value && !ui_.show_number);
+
+    lv_label_set_text(title_label_, ui_.title);
+    if (value && !ui_.show_number) {
+        lv_label_set_text_fmt(info_label_, "%s\n%s", ui_.line1, ui_.line2);
+    }
+    lv_obj_align(value_label_, LV_ALIGN_CENTER, 0, control ? -18 : 6);
+
+    // Force text to be redrawn for the new layout
+    shown_value_ = INT32_MIN;
+    shown_text_[0] = 0;
 }
 
 void DisplayTask::updateScreen(const PB_SmartKnobState& state) {
@@ -175,7 +247,28 @@ void DisplayTask::updateScreen(const PB_SmartKnobState& state) {
     int32_t y = CENTER + (int32_t)(RING_RADIUS * sinf(radians)) - DOT_SIZE / 2;
     lv_obj_set_pos(dot_, x, y);
 
-    // Value (only redraw when it changes)
+    if (ui_.layout == UiLayout::LIST) {
+        // Selected item and its neighbours (only redraw when the selection moves)
+        int32_t count = ui_.item_count;
+        int32_t sel = CLAMP(state.current_position, (int32_t)0, count - 1);
+        if (count > 0 && sel != shown_value_) {
+            shown_value_ = sel;
+            lv_label_set_text(list_prev_, sel > 0 ? ui_.items[sel - 1] : "");
+            lv_label_set_text(list_sel_, ui_.items[sel]);
+            lv_label_set_text(list_next_, sel < count - 1 ? ui_.items[sel + 1] : "");
+        }
+        return;
+    }
+
+    if (ui_.layout == UiLayout::VALUE) {
+        if (ui_.show_number && state.current_position != shown_value_) {
+            shown_value_ = state.current_position;
+            lv_label_set_text_fmt(value_label_, "%d%s", (int)(state.current_position * ui_.number_multiplier), ui_.suffix);
+        }
+        return;
+    }
+
+    // Control layout: value (only redraw when it changes)
     if (state.current_position != shown_value_) {
         shown_value_ = state.current_position;
         lv_label_set_text_fmt(value_label_, "%d", (int)state.current_position);
@@ -190,6 +283,10 @@ void DisplayTask::updateScreen(const PB_SmartKnobState& state) {
         strncpy(shown_text_, text, sizeof(shown_text_) - 1);
         lv_label_set_text(text_label_, text);
     }
+}
+
+void DisplayTask::showScreen(const UiScreen& screen) {
+    xQueueOverwrite(ui_screen_queue_, &screen);
 }
 
 QueueHandle_t DisplayTask::getKnobStateQueue() {
