@@ -1,5 +1,9 @@
 #pragma once
 
+#ifndef SK_BLE
+    #define SK_BLE 0
+#endif
+
 #include <AceButton.h>
 #include <Arduino.h>
 
@@ -17,6 +21,10 @@
 #include "touch_gestures.h"
 #include "touch_ring.h"
 #include "ring_stepper.h"
+#endif
+
+#if SK_BLE
+#include "ble_output.h"
 #endif
 
 #ifndef SK_FORCE_UART_STREAM
@@ -72,6 +80,14 @@ class InterfaceTask : public Task<InterfaceTask>, public Logger {
         bool ring_was_active_ = false;
         bool ring_is_slide_ = false;  // moved far enough to count as a slide, not a tap
         void updateTouch();
+        #endif
+
+        #if SK_BLE
+        BleOutput ble_;
+        int ble_last_config_ = -1;          // mode the last sent position belongs to
+        int32_t ble_last_position_ = 0;     // value when keys were last sent
+        bool ble_was_connected_ = false;
+        void updateBleOutput();
         #endif
 
         PB_SmartKnobState latest_state_ = {};

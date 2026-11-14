@@ -26,6 +26,14 @@ HX711 scale;
 Adafruit_VEML7700 veml = Adafruit_VEML7700();
 #endif
 
+#if SK_BLE
+// What each Bluetooth mode sends when the knob's value changes.
+// These modes are the first entries in configs[] below, in this order.
+enum class KnobOutput { VOLUME, SCROLL, ARROWS };
+static const KnobOutput ble_mode_outputs[] = { KnobOutput::VOLUME, KnobOutput::SCROLL, KnobOutput::ARROWS };
+static const bool BLE_FINE_VOLUME = true;  // Shift+Option quarter steps on macOS
+#endif
+
 static PB_SmartKnobConfig configs[] = {
     // int32_t position;
     // float sub_position_unit;
@@ -42,6 +50,56 @@ static PB_SmartKnobConfig configs[] = {
     // float snap_point_bias;
     // int8_t led_hue;
 
+#if SK_BLE
+    {
+        0,
+        0,
+        0,
+        0,
+        -1, // no limits: the Mac doesn't tell us its volume
+        8 * PI / 180,
+        0.8,
+        1,
+        1.1,
+        "Volume",
+        0,
+        {},
+        0,
+        0,
+    },
+    {
+        0,
+        0,
+        0,
+        0,
+        -1,
+        3 * PI / 180,
+        0.3,
+        1,
+        1.1,
+        "Scroll",
+        0,
+        {},
+        0,
+        0,
+    },
+    {
+        0,
+        0,
+        0,
+        0,
+        -1,
+        15 * PI / 180,
+        1,
+        1,
+        1.1,
+        "Arrows\nLeft / Right",
+        0,
+        {},
+        0,
+        0,
+    },
+#endif
     {
         0,
         0,
@@ -221,7 +279,8 @@ static PB_SmartKnobConfig configs[] = {
 };
 
 InterfaceTask::InterfaceTask(const uint8_t task_core, MotorTask& motor_task, DisplayTask* display_task) : 
-        Task("Interface", 3400, 1, task_core),
+        // Bluetooth sends happen on this task, so give it more stack room when enabled
+        Task("Interface", SK_BLE ? 6000 : 3400, 1, task_core),
         stream_(),
         motor_task_(motor_task),
         display_task_(display_task),
@@ -264,6 +323,11 @@ void InterfaceTask::run() {
 
     #if SK_TOUCH
         touch_.begin(PIN_TOUCH_SDA, PIN_TOUCH_SCL);
+    #endif
+
+    #if SK_BLE
+        ble_.begin("SmartKnob");
+        log("Bluetooth: pair with \"SmartKnob\" in your Mac's Bluetooth settings");
     #endif
 
     #if SK_STRAIN
@@ -336,6 +400,9 @@ void InterfaceTask::run() {
     while (1) {
         if (xQueueReceive(knob_state_queue_, &latest_state_, 0) == pdTRUE) {
             publishState();
+            #if SK_BLE
+                updateBleOutput();
+            #endif
         }
 
         current_protocol_->loop();
@@ -619,6 +686,51 @@ void InterfaceTask::updateTouch() {
             break;
         default:
             // Swipe up/down: logged only, reserved for later
+            break;
+    }
+}
+#endif
+
+#if SK_BLE
+void InterfaceTask::updateBleOutput() {
+    bool connected = ble_.isConnected();
+    if (connected != ble_was_connected_) {
+        ble_was_connected_ = connected;
+        log(connected ? "Bluetooth: connected" : "Bluetooth: disconnected");
+    }
+
+    // Wait until the motor has switched to the current mode, so a mode change
+    // (which resets the value) isn't mistaken for turning the knob
+    if (strcmp(latest_state_.config.text, latest_config_.text) != 0) {
+        return;
+    }
+
+    int32_t position = latest_state_.current_position;
+    if (current_config_ != ble_last_config_) {
+        ble_last_config_ = current_config_;
+        ble_last_position_ = position;
+        return;
+    }
+
+    int32_t steps = position - ble_last_position_;
+    if (steps == 0) {
+        return;
+    }
+    ble_last_position_ = position;
+
+    // Only the Bluetooth modes (first in the list) send anything
+    if (remote_controlled_ || current_config_ >= (int)COUNT_OF(ble_mode_outputs)) {
+        return;
+    }
+    switch (ble_mode_outputs[current_config_]) {
+        case KnobOutput::VOLUME:
+            ble_.volumeSteps(steps, BLE_FINE_VOLUME);
+            break;
+        case KnobOutput::SCROLL:
+            ble_.scrollSteps(steps);
+            break;
+        case KnobOutput::ARROWS:
+            ble_.arrowSteps(steps);
             break;
     }
 }

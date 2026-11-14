@@ -116,4 +116,20 @@ after ~4 degrees of travel; less than that still counts as a tap. Clockwise rais
 - **FOLLOW**: the motor turns the knob to follow your finger. Tuning: `FOLLOW_P`, `FOLLOW_D`,
   `FOLLOW_LIMIT` at the top of `firmware/src/motor_task.cpp`.
 
-Not done yet: the Function button, Bluetooth control of the Mac/iPad.
+## Bluetooth (Mac / iPad)
+
+The knob pairs as **SmartKnob** (System Settings → Bluetooth). It acts as a keyboard + media keys + mouse wheel;
+nothing to install on the Mac. The monitor prints `Bluetooth: connected` / `disconnected`.
+
+The first three modes send keys whenever the value changes (knob, rim TRACK or FOLLOW):
+
+| Mode | Sends | Feel |
+|---|---|---|
+| Volume | volume up/down in quarter steps (Shift+Option) | 8 degree clicks, no end stops |
+| Scroll | mouse wheel, clockwise = down | 3 degree light clicks |
+| Arrows | right / left arrow keys | 15 degree firm clicks |
+
+Code: `firmware/src/ble_output.*` (keys), `updateBleOutput()` in `interface_task.cpp` (which mode sends what).
+Library: ESP32-BLE-CompositeHID v0.4.0 (NimBLE).
+
+Not done yet: the Function button, long-press actions.
