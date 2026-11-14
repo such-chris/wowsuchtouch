@@ -539,10 +539,13 @@ void InterfaceTask::updateTouch() {
             }
             break;
         case TouchGesture::DOUBLE_TAP:
-            // Two firm clicks (action reserved for later)
+            // Two firm clicks + previous mode
             motor_task_.playHaptic(true);
             delay(80);
             motor_task_.playHaptic(true);
+            if (!remote_controlled_) {
+                changeConfig(false);
+            }
             break;
         case TouchGesture::TRIPLE_TAP:
             // Three firm clicks (action reserved for later)

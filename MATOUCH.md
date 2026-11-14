@@ -97,7 +97,7 @@ Every gesture is printed in the monitor, e.g. `Touch: DOUBLE_TAP at (120, 98)`, 
 | Gesture | Feel | Does |
 |---|---|---|
 | Tap | firm click | next mode |
-| Double tap | two firm clicks | nothing yet (reserved) |
+| Double tap | two firm clicks | previous mode |
 | Triple tap | three firm clicks | nothing yet (reserved) |
 | Long press (~0.6 s) | firm click while still held | nothing yet (reserved) |
 | Swipe left / right | light click | next / previous mode |
