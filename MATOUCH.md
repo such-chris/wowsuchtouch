@@ -105,7 +105,7 @@ Every gesture is printed in the monitor, e.g. `Touch: DOUBLE_TAP at (120, 98)`, 
 | Double tap / swipe right | in an app | previous page |
 | Turn the knob | in a menu | move through the list (one click per item) |
 | Tap | in a menu | open / choose |
-| Double tap | in a menu | back |
+| Double tap / swipe right | in a menu | back |
 | Slide around the rim | anywhere | acts like turning the knob (Settings > Touch) |
 
 Single and double taps wait ~0.25 s to make sure another tap isn't coming.

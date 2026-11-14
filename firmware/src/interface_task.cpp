@@ -781,7 +781,7 @@ void InterfaceTask::updateTouch() {
     }
 
     if (nav_screen_ != NavScreen::APP) {
-        // In a menu: tap opens / chooses, double tap goes back
+        // In a menu: tap opens / chooses; double tap or swipe right goes back
         if (gesture == TouchGesture::TAP) {
             motor_task_.playHaptic(true);
             navSelect();
@@ -789,6 +789,9 @@ void InterfaceTask::updateTouch() {
             motor_task_.playHaptic(true);
             delay(80);
             motor_task_.playHaptic(true);
+            navBack();
+        } else if (gesture == TouchGesture::SWIPE_RIGHT) {
+            motor_task_.playHaptic(false);
             navBack();
         }
         return;
