@@ -509,6 +509,17 @@ void InterfaceTask::updateTouch() {
 
     uint16_t x = 0, y = 0;
     bool touching = touch_.read(x, y);
+
+    // Sliding around the rim works like a click wheel (test: log + light click per step)
+    int ring_steps = touch_ring_.update(touching, x, y);
+    if (ring_steps != 0) {
+        // This touch is a ring slide, so don't also report it as a swipe or tap
+        touch_gestures_.cancelCurrentTouch();
+        snprintf(buf_, sizeof(buf_), "Ring: %+d (angle %d)", ring_steps, (int)touch_ring_.angle());
+        log(buf_);
+        motor_task_.playHaptic(false);
+    }
+
     TouchGesture gesture = touch_gestures_.update(touching, x, y, now);
     if (gesture == TouchGesture::NONE) {
         return;
@@ -529,6 +540,14 @@ void InterfaceTask::updateTouch() {
             break;
         case TouchGesture::DOUBLE_TAP:
             // Two firm clicks (action reserved for later)
+            motor_task_.playHaptic(true);
+            delay(80);
+            motor_task_.playHaptic(true);
+            break;
+        case TouchGesture::TRIPLE_TAP:
+            // Three firm clicks (action reserved for later)
+            motor_task_.playHaptic(true);
+            delay(80);
             motor_task_.playHaptic(true);
             delay(80);
             motor_task_.playHaptic(true);

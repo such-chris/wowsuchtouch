@@ -6,6 +6,7 @@ const char* touchGestureName(TouchGesture gesture) {
     switch (gesture) {
         case TouchGesture::TAP:         return "TAP";
         case TouchGesture::DOUBLE_TAP:  return "DOUBLE_TAP";
+        case TouchGesture::TRIPLE_TAP:  return "TRIPLE_TAP";
         case TouchGesture::LONG_PRESS:  return "LONG_PRESS";
         case TouchGesture::SWIPE_LEFT:  return "SWIPE_LEFT";
         case TouchGesture::SWIPE_RIGHT: return "SWIPE_RIGHT";
@@ -35,7 +36,7 @@ TouchGesture TouchGestures::update(bool touching, uint16_t x, uint16_t y, uint32
         if (!long_fired_ && now_ms - down_ms_ >= long_press_ms
                 && dx <= move_tolerance_px && dy <= move_tolerance_px) {
             long_fired_ = true;
-            tap_pending_ = false;
+            tap_count_ = 0;
             return TouchGesture::LONG_PRESS;
         }
         return TouchGesture::NONE;
@@ -52,7 +53,7 @@ TouchGesture TouchGestures::update(bool touching, uint16_t x, uint16_t y, uint32
         int dy = (int)last_y_ - (int)start_y_;
 
         if (abs(dx) >= swipe_min_px || abs(dy) >= swipe_min_px) {
-            tap_pending_ = false;
+            tap_count_ = 0;
             if (abs(dx) >= abs(dy)) {
                 return dx > 0 ? TouchGesture::SWIPE_RIGHT : TouchGesture::SWIPE_LEFT;
             }
@@ -62,21 +63,30 @@ TouchGesture TouchGestures::update(bool touching, uint16_t x, uint16_t y, uint32
         bool short_enough = now_ms - down_ms_ <= tap_max_ms;
         bool still_enough = abs(dx) <= move_tolerance_px && abs(dy) <= move_tolerance_px;
         if (short_enough && still_enough) {
-            if (tap_pending_) {
-                // Second tap arrived before the window ran out
-                tap_pending_ = false;
-                return TouchGesture::DOUBLE_TAP;
-            }
-            tap_pending_ = true;
+            tap_count_++;
             tap_up_ms_ = now_ms;
+            if (tap_count_ >= 3) {
+                // Three taps is the most we count, so report it right away
+                tap_count_ = 0;
+                return TouchGesture::TRIPLE_TAP;
+            }
+        } else {
+            tap_count_ = 0;
         }
         return TouchGesture::NONE;
     }
 
-    // No finger: if a tap has waited out the double-tap window, it was a single tap
-    if (tap_pending_ && now_ms - tap_up_ms_ > double_tap_window_ms) {
-        tap_pending_ = false;
-        return TouchGesture::TAP;
+    // No finger: once the window runs out with no further tap, report how many taps there were
+    if (tap_count_ > 0 && now_ms - tap_up_ms_ > double_tap_window_ms) {
+        uint8_t count = tap_count_;
+        tap_count_ = 0;
+        return count == 1 ? TouchGesture::TAP : TouchGesture::DOUBLE_TAP;
     }
     return TouchGesture::NONE;
+}
+
+void TouchGestures::cancelCurrentTouch() {
+    // Reuse the long-press flag: it makes the lift-off report nothing
+    long_fired_ = true;
+    tap_count_ = 0;
 }

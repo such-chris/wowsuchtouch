@@ -6,6 +6,7 @@ enum class TouchGesture {
     NONE,
     TAP,
     DOUBLE_TAP,
+    TRIPLE_TAP,
     LONG_PRESS,
     SWIPE_LEFT,
     SWIPE_RIGHT,
@@ -22,7 +23,7 @@ class TouchGestures {
     public:
         // Tuning (milliseconds and screen pixels)
         uint32_t tap_max_ms = 300;          // touches longer than this aren't taps
-        uint32_t double_tap_window_ms = 250; // wait this long after a tap for a second one
+        uint32_t double_tap_window_ms = 250; // wait this long after a tap for another one
         uint32_t long_press_ms = 600;       // hold still this long = long press
         int16_t move_tolerance_px = 15;     // wiggle allowed for taps and long presses
         int16_t swipe_min_px = 50;          // travel needed to count as a swipe
@@ -34,10 +35,13 @@ class TouchGestures {
         uint16_t gestureX() const { return start_x_; }
         uint16_t gestureY() const { return start_y_; }
 
+        // Ignore the rest of the current touch (e.g. it was used as a ring slide).
+        void cancelCurrentTouch();
+
     private:
         bool down_ = false;         // finger currently on the screen
         bool long_fired_ = false;   // long press already reported for this touch
-        bool tap_pending_ = false;  // a tap happened; waiting to see if a second follows
+        uint8_t tap_count_ = 0;     // taps so far in a possible double/triple tap
         uint32_t down_ms_ = 0;      // when the finger landed
         uint32_t tap_up_ms_ = 0;    // when the pending tap's finger lifted
         uint16_t start_x_ = 0;

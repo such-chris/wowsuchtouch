@@ -15,6 +15,7 @@
 #if SK_TOUCH
 #include "cst816s_touch.h"
 #include "touch_gestures.h"
+#include "touch_ring.h"
 #endif
 
 #ifndef SK_FORCE_UART_STREAM
@@ -61,6 +62,7 @@ class InterfaceTask : public Task<InterfaceTask>, public Logger {
         #if SK_TOUCH
         CST816STouch touch_;
         TouchGestures touch_gestures_;
+        TouchRing touch_ring_;
         void updateTouch();
         #endif
 

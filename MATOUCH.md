@@ -87,6 +87,7 @@ If the upload can't connect, use the Flash-button trick from step 3, then press 
 
 - `firmware/src/cst816s_touch.*`: reads the touch chip (one finger, I2C address 0x15, pins 6/8)
 - `firmware/src/touch_gestures.*`: turns touches into gestures; tuning values at the top of `touch_gestures.h`
+- `firmware/src/touch_ring.*`: click-wheel style sliding around the rim; tuning at the top of `touch_ring.h`
 - `firmware/src/interface_task.*`: what each gesture does (`updateTouch()`), when `SK_TOUCH=1`
 
 ## Touch gestures
@@ -97,10 +98,15 @@ Every gesture is printed in the monitor, e.g. `Touch: DOUBLE_TAP at (120, 98)`, 
 |---|---|---|
 | Tap | firm click | next mode |
 | Double tap | two firm clicks | nothing yet (reserved) |
+| Triple tap | three firm clicks | nothing yet (reserved) |
 | Long press (~0.6 s) | firm click while still held | nothing yet (reserved) |
 | Swipe left / right | light click | next / previous mode |
 | Swipe up / down | none | nothing yet (reserved) |
+| Slide around the rim | light click per step | test only: prints `Ring: +1 (angle 93)` |
 
-A single tap waits ~0.25 s to make sure it isn't the start of a double tap.
+Single and double taps wait ~0.25 s to make sure another tap isn't coming.
+
+The rim slider (`touch_ring.*`) counts a step every 15 degrees while your finger is in the outer band of the screen
+(more than 75 px from center). Clockwise is +. A touch used as a rim slide isn't also reported as a swipe or tap.
 
 Not done yet: the Function button, Bluetooth control of the Mac/iPad.
