@@ -22,6 +22,11 @@ struct UiScreen {
     // LIST: one label per knob position (0 = first)
     uint8_t item_count = 0;
     bool wrap = false;  // turning past the last item comes back to the first
+
+    // Where the position ring sits (true = along the bottom, false = along the top)
+    bool ring_at_bottom = false;
+    // Show the Bluetooth / battery status line at the top
+    bool show_status = false;
     char items[UI_MAX_ITEMS][UI_TEXT_LEN] = {};
 
     // VALUE: shows (knob position x multiplier) + suffix, or line1/line2 if show_number is false
@@ -35,6 +40,7 @@ struct UiScreen {
 // Status line at the top of every screen
 struct UiStatus {
     bool bluetooth = false;   // connected to a Mac / iPad
+    bool usb = false;         // plugged into a computer (charging)
     int8_t battery_pct = -1;  // -1 = no reading
 };
 

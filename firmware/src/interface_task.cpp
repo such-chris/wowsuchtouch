@@ -22,6 +22,12 @@
 #ifndef LV_SYMBOL_BATTERY_1
 #define LV_SYMBOL_BATTERY_1 ""
 #endif
+#ifndef LV_SYMBOL_BATTERY_FULL
+#define LV_SYMBOL_BATTERY_FULL ""
+#endif
+#ifndef LV_SYMBOL_CHARGE
+#define LV_SYMBOL_CHARGE ""
+#endif
 
 #if SK_LEDS
 CRGB leds[NUM_LEDS];
@@ -333,6 +339,12 @@ static const char* setting_names[SET_COUNT] = {
 };
 static const char* touch_mode_names[] = {"Track", "Follow", "Off"};
 
+// A screen inside Bluetooth (not in the Settings list itself)
+static const int SET_BT_DEVICES = SET_COUNT;
+
+// How long "Add device" lets new devices pair
+static const uint32_t PAIRING_WINDOW_MS = 120000;
+
 // How far from the top / bottom edge a swipe must start to open Settings / Apps (pixels)
 static const uint16_t EDGE_SWIPE_PX = 60;
 
@@ -534,8 +546,28 @@ void InterfaceTask::run() {
         #endif
 
         #if SK_BLE
-            ble_.update(millis());
+        {
+            PairingEvent pairing = ble_.update(millis());
+            if (pairing == PairingEvent::PAIRED) {
+                log("Bluetooth: new device paired");
+                toast(LV_SYMBOL_BLUETOOTH " Paired");
+                refreshBluetoothScreen();
+            } else if (pairing == PairingEvent::CLOSED) {
+                log("Bluetooth: pairing closed");
+                toast("Pairing closed");
+                refreshBluetoothScreen();
+            }
+
+            // Keep the pairing countdown ticking on the Bluetooth screen
+            static uint32_t last_countdown;
+            if (ble_.isPairing() && millis() - last_countdown >= 1000) {
+                last_countdown = millis();
+                refreshBluetoothScreen();
+            }
+        }
         #endif
+
+        updateUsbPower();
 
         #ifdef PIN_BATTERY_ADC
             updateBattery();
@@ -853,9 +885,7 @@ void InterfaceTask::updateBleOutput() {
         log(connected ? "Bluetooth: connected" : "Bluetooth: disconnected");
         toast(connected ? LV_SYMBOL_BLUETOOTH " Connected" : LV_SYMBOL_BLUETOOTH " Disconnected");
         sendStatus();
-        if (nav_screen_ == NavScreen::SETTING && open_setting_ == SET_BLUETOOTH) {
-            openSetting(SET_BLUETOOTH);  // show the new status
-        }
+        refreshBluetoothScreen();
     }
 
     // Wait until the motor has switched to the current mode, so a mode change
@@ -966,31 +996,45 @@ void InterfaceTask::powerOff() {
 
 #ifdef PIN_BATTERY_ADC
 void InterfaceTask::updateBattery() {
-    // Read at startup (after things settle) and then every 30 seconds
+    // Read every 5 seconds (after startup settles); log every 30
     static uint32_t last_read;
+    static uint32_t last_log;
     uint32_t now = millis();
-    if (now < 2000 || (last_read != 0 && now - last_read < 30000)) {
+    if (now < 2000 || (last_read != 0 && now - last_read < 5000)) {
         return;
     }
     last_read = now;
 
-    // Average a few readings; the board halves the battery voltage (two 330K resistors)
+    // Average a burst of readings; the board halves the battery voltage (two 330K resistors)
     uint32_t sum_mv = 0;
     for (uint8_t i = 0; i < 16; i++) {
         sum_mv += analogReadMilliVolts(PIN_BATTERY_ADC);
     }
-    battery_mv_ = (sum_mv / 16) * 2;
+    uint32_t reading_mv = (sum_mv / 16) * 2;
 
-    uint8_t pct = batteryPercentFromMillivolts(battery_mv_);
-    snprintf(buf_, sizeof(buf_), "Battery: %.2f V (about %d%%)", battery_mv_ / 1000.0f, pct);
-    log(buf_);
+    // Smooth over time so motor bursts and noise don't make it jump
+    battery_mv_ = battery_mv_ == 0 ? reading_mv : (battery_mv_ * 7 + reading_mv * 3) / 10;
+    int8_t pct = batteryPercentFromMillivolts(battery_mv_);
+
+    // On battery the level can only go down; it may rise only while plugged in.
+    // (Charging pushes the voltage up, so readings while plugged in run high.)
+    if (battery_pct_shown_ < 0 || usb_power_.connected() || pct < battery_pct_shown_) {
+        battery_pct_shown_ = pct;
+    }
+
+    if (last_log == 0 || now - last_log >= 30000) {
+        last_log = now;
+        snprintf(buf_, sizeof(buf_), "Battery: %.2f V (about %d%%)%s",
+            battery_mv_ / 1000.0f, battery_pct_shown_, usb_power_.connected() ? ", charging" : "");
+        log(buf_);
+    }
     sendStatus();
 
     // Warn once when it gets low; warn again only after it has been charged back up
-    if (pct <= 15 && !battery_low_warned_) {
+    if (!usb_power_.connected() && battery_pct_shown_ <= 15 && !battery_low_warned_) {
         battery_low_warned_ = true;
         toast(LV_SYMBOL_BATTERY_1 " Battery low");
-    } else if (pct >= 25) {
+    } else if (battery_pct_shown_ >= 25) {
         battery_low_warned_ = false;
     }
 }
@@ -1035,10 +1079,9 @@ void InterfaceTask::sendStatus() {
     #if SK_BLE
         status.bluetooth = ble_.isConnected();
     #endif
+    status.usb = usb_power_.connected();
     #ifdef PIN_BATTERY_ADC
-        if (battery_mv_ > 0) {
-            status.battery_pct = batteryPercentFromMillivolts(battery_mv_);
-        }
+        status.battery_pct = battery_pct_shown_;
     #endif
     #if SK_DISPLAY
         if (display_task_ != nullptr) {
@@ -1097,13 +1140,11 @@ void InterfaceTask::openAppsList() {
     ui.layout = UiLayout::LIST;
     copyText(ui.title, "Apps");
     ui.item_count = APP_COUNT;
-    ui.wrap = true;
     for (int i = 0; i < APP_COUNT; i++) {
         copyText(ui.items[i], apps[i].name);
     }
     showUi(ui);
-    nav_list_count_ = APP_COUNT;
-    PB_SmartKnobConfig config = makeListConfig("Apps", APP_COUNT, current_app_, ++nav_nonce_, true);
+    PB_SmartKnobConfig config = makeListConfig("Apps", APP_COUNT, current_app_, ++nav_nonce_);
     applyConfig(config, false);
 }
 
@@ -1112,14 +1153,14 @@ void InterfaceTask::openSettingsList(int selected) {
     UiScreen ui;
     ui.layout = UiLayout::LIST;
     copyText(ui.title, "Settings");
+    ui.ring_at_bottom = true;
+    ui.show_status = true;
     ui.item_count = SET_COUNT;
-    ui.wrap = true;
     for (int i = 0; i < SET_COUNT; i++) {
         copyText(ui.items[i], setting_names[i]);
     }
     showUi(ui);
-    nav_list_count_ = SET_COUNT;
-    PB_SmartKnobConfig config = makeListConfig("Settings", SET_COUNT, selected, ++nav_nonce_, true);
+    PB_SmartKnobConfig config = makeListConfig("Settings", SET_COUNT, selected, ++nav_nonce_);
     applyConfig(config, false);
 }
 
@@ -1128,7 +1169,9 @@ void InterfaceTask::openSetting(int item) {
     open_setting_ = item;
 
     UiScreen ui;
-    copyText(ui.title, setting_names[item]);
+    copyText(ui.title, item < SET_COUNT ? setting_names[item] : "Devices");
+    ui.ring_at_bottom = true;
+    ui.show_status = true;
     PB_SmartKnobConfig config;
 
     switch (item) {
@@ -1151,25 +1194,26 @@ void InterfaceTask::openSetting(int item) {
         case SET_TOUCH:
             ui.layout = UiLayout::LIST;
             ui.item_count = COUNT_OF(touch_mode_names);
-            ui.wrap = true;
-            for (int i = 0; i < ui.item_count; i++) {
+                    for (int i = 0; i < ui.item_count; i++) {
                 copyText(ui.items[i], touch_mode_names[i]);
             }
-            nav_list_count_ = ui.item_count;
-            config = makeListConfig("Touch", ui.item_count, settings_.touch_mode, ++nav_nonce_, true);
+            config = makeListConfig("Touch", ui.item_count, settings_.touch_mode, ++nav_nonce_);
             break;
-        case SET_BLUETOOTH: {
+        case SET_BLUETOOTH:
+            fillBluetoothList(ui);
+            config = makeListConfig("Bluetooth", ui.item_count, 0, ++nav_nonce_);
+            break;
+        case SET_BT_DEVICES: {
+            ui.layout = UiLayout::VALUE;
+            int paired = 0;
             bool connected = false;
             #if SK_BLE
+                paired = ble_.pairedCount();
                 connected = ble_.isConnected();
             #endif
-            ui.layout = UiLayout::LIST;
-            ui.item_count = 2;
-            ui.wrap = true;
-            copyText(ui.items[0], connected ? "Connected" : "Not connected");
-            copyText(ui.items[1], "Forget all");
-            nav_list_count_ = 2;
-            config = makeListConfig("Bluetooth", 2, 0, ++nav_nonce_, true);
+            snprintf(ui.line1, UI_TEXT_LEN, paired == 1 ? "1 device paired" : "%d devices paired", paired);
+            copyText(ui.line2, connected ? "1 connected" : "none connected");
+            config = makeStillConfig("Devices", ++nav_nonce_);
             break;
         }
         case SET_CALIBRATE:
@@ -1183,7 +1227,7 @@ void InterfaceTask::openSetting(int item) {
             #ifdef PIN_BATTERY_ADC
                 if (battery_mv_ > 0) {
                     snprintf(ui.line1, UI_TEXT_LEN, "%.2f V", battery_mv_ / 1000.0f);
-                    snprintf(ui.line2, UI_TEXT_LEN, "about %d%%", batteryPercentFromMillivolts(battery_mv_));
+                    snprintf(ui.line2, UI_TEXT_LEN, "about %d%%%s", battery_pct_shown_, usb_power_.connected() ? ", charging" : "");
                 } else {
                     copyText(ui.line1, "Reading...");
                 }
@@ -1222,15 +1266,24 @@ void InterfaceTask::navSelect() {
                     openSettingsList(SET_TOUCH);
                     break;
                 case SET_BLUETOOTH:
-                    if (sel == 1) {
-                        #if SK_BLE
+                    #if SK_BLE
+                        if (sel == 0) {
+                            openSetting(SET_BT_DEVICES);
+                        } else if (sel == 1) {
+                            if (!ble_.isPairing()) {
+                                ble_.openPairing(PAIRING_WINDOW_MS);
+                                log("Bluetooth: pairing open for 2 minutes");
+                            }
+                            toast("Open Bluetooth on your Mac");
+                            refreshBluetoothScreen();
+                        } else if (sel == 2) {
                             log("Bluetooth: forgetting all devices and restarting");
                             ble_.forgetAllDevices();
                             saveSettings();
                             delay(200);
                             ESP.restart();
-                        #endif
-                    }
+                        }
+                    #endif
                     break;
                 case SET_CALIBRATE:
                     log("Calibrating: hands off the knob");
@@ -1252,7 +1305,11 @@ void InterfaceTask::navBack() {
     switch (nav_screen_) {
         case NavScreen::SETTING:
             saveSettings();
-            openSettingsList(open_setting_);
+            if (open_setting_ == SET_BT_DEVICES) {
+                openSetting(SET_BLUETOOTH);
+            } else {
+                openSettingsList(open_setting_);
+            }
             break;
         case NavScreen::APPS_LIST:
         case NavScreen::SETTINGS_LIST:
@@ -1298,4 +1355,57 @@ void InterfaceTask::saveSettings() {
         settings_.volume = ble_volume_level_;
     #endif
     settings_store_.save(settings_);
+}
+
+void InterfaceTask::updateUsbPower() {
+    // Check a few times a second whether a computer is plugged in
+    static uint32_t last_check;
+    uint32_t now = millis();
+    if (now - last_check < 250) {
+        return;
+    }
+    last_check = now;
+
+    bool was_connected = usb_power_.connected();
+    bool connected = usb_power_.update(now);
+    if (connected != was_connected) {
+        log(connected ? "USB: plugged in (charging)" : "USB: unplugged");
+        toast(connected ? LV_SYMBOL_CHARGE " Charging" : LV_SYMBOL_BATTERY_FULL " On battery");
+        sendStatus();
+    }
+}
+
+void InterfaceTask::fillBluetoothList(UiScreen& ui) {
+    ui.layout = UiLayout::LIST;
+    ui.item_count = 3;
+    bool connected = false;
+    bool pairing = false;
+    uint32_t seconds_left = 0;
+    #if SK_BLE
+        connected = ble_.isConnected();
+        pairing = ble_.isPairing();
+        seconds_left = ble_.pairingSecondsLeft(millis());
+    #endif
+    copyText(ui.items[0], connected ? "Connected" : "Not connected");
+    if (pairing && seconds_left > 0) {
+        snprintf(ui.items[1], UI_TEXT_LEN, "Pairing %u:%02u", (unsigned)(seconds_left / 60), (unsigned)(seconds_left % 60));
+    } else if (pairing) {
+        copyText(ui.items[1], "Pairing...");
+    } else {
+        copyText(ui.items[1], "Add device");
+    }
+    copyText(ui.items[2], "Forget all");
+}
+
+void InterfaceTask::refreshBluetoothScreen() {
+    // Redraw the Bluetooth list's text without moving the knob
+    if (nav_screen_ != NavScreen::SETTING || open_setting_ != SET_BLUETOOTH) {
+        return;
+    }
+    UiScreen ui;
+    copyText(ui.title, setting_names[SET_BLUETOOTH]);
+    ui.ring_at_bottom = true;
+    ui.show_status = true;
+    fillBluetoothList(ui);
+    showUi(ui);
 }

@@ -10,6 +10,10 @@
 #include <NimBLEDevice.h>
 #include <stdlib.h>
 
+// Only let paired devices connect when not pairing. If a paired Mac/iPad ever
+// can't reconnect, set this to false (or use Settings > Bluetooth > Add device).
+static const bool PAIRED_ONLY = true;
+
 // Most key repeats sent for one update, so a fast spin can't flood the connection
 static const int32_t MAX_STEPS_PER_UPDATE = 20;
 
@@ -34,6 +38,53 @@ void BleOutput::begin(const char* device_name) {
     hid_->addDevice(keyboard_);
     hid_->addDevice(mouse_);
     hid_->begin();
+
+    // Nothing paired yet: stay open until the first device pairs
+    if (NimBLEDevice::getNumBonds() == 0) {
+        openPairing(0);
+    } else {
+        applyAdvertising();
+    }
+}
+
+void BleOutput::applyAdvertising() {
+    // Rebuild the allowed list from the devices we've paired with
+    while (NimBLEDevice::getWhiteListCount() > 0) {
+        NimBLEDevice::whiteListRemove(NimBLEDevice::getWhiteListAddress(0));
+    }
+    int bonds = NimBLEDevice::getNumBonds();
+    for (int i = 0; i < bonds; i++) {
+        NimBLEDevice::whiteListAdd(NimBLEDevice::getBondedAddress(i));
+    }
+
+    // Restart the "I'm here" signal with the new rule
+    bool paired_only = PAIRED_ONLY && !pairing_ && bonds > 0;
+    NimBLEAdvertising* advertising = NimBLEDevice::getAdvertising();
+    advertising->stop();
+    advertising->setScanFilter(false, paired_only);
+    advertising->start();
+}
+
+void BleOutput::openPairing(uint32_t duration_ms) {
+    pairing_ = true;
+    bonds_at_open_ = NimBLEDevice::getNumBonds();
+    pairing_end_ms_ = duration_ms == 0 ? 0 : millis() + duration_ms;
+    if (pairing_end_ms_ == 0 && duration_ms != 0) {
+        pairing_end_ms_ = 1;  // (0 means "no time limit")
+    }
+    applyAdvertising();
+}
+
+uint32_t BleOutput::pairingSecondsLeft(uint32_t now_ms) const {
+    if (!pairing_ || pairing_end_ms_ == 0) {
+        return 0;
+    }
+    int32_t left_ms = (int32_t)(pairing_end_ms_ - now_ms);
+    return left_ms > 0 ? (left_ms + 999) / 1000 : 0;
+}
+
+int BleOutput::pairedCount() {
+    return NimBLEDevice::getNumBonds();
 }
 
 bool BleOutput::isConnected() {
@@ -62,10 +113,21 @@ void BleOutput::releaseModifiers() {
     }
 }
 
-void BleOutput::update(uint32_t now_ms) {
+PairingEvent BleOutput::update(uint32_t now_ms) {
     if (held_modifiers_ && now_ms - last_hold_use_ms_ > MODIFIER_RELEASE_MS) {
         releaseModifiers();
     }
+
+    if (pairing_) {
+        bool new_device = NimBLEDevice::getNumBonds() > bonds_at_open_;
+        bool timed_out = pairing_end_ms_ != 0 && (int32_t)(now_ms - pairing_end_ms_) >= 0;
+        if (new_device || timed_out) {
+            pairing_ = false;
+            applyAdvertising();
+            return new_device ? PairingEvent::PAIRED : PairingEvent::CLOSED;
+        }
+    }
+    return PairingEvent::NONE;
 }
 
 void BleOutput::tapMediaKey(uint32_t media_key) {
@@ -115,6 +177,7 @@ void BleOutput::arrowSteps(int32_t steps) {
 
 void BleOutput::forgetAllDevices() {
     NimBLEDevice::deleteAllBonds();
+    openPairing(0);  // nothing paired any more, so stay open for a new device
 }
 
 #endif // SK_BLE

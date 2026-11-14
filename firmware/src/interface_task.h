@@ -17,6 +17,7 @@
 #include "task.h"
 #include "settings_store.h"
 #include "ui_screen.h"
+#include "usb_power.h"
 
 #if SK_TOUCH
 #include "cst816s_touch.h"
@@ -113,7 +114,8 @@ class InterfaceTask : public Task<InterfaceTask>, public Logger {
         #endif
 
         #ifdef PIN_BATTERY_ADC
-        uint32_t battery_mv_ = 0;  // latest battery reading in millivolts (0 = none yet)
+        uint32_t battery_mv_ = 0;      // smoothed battery voltage in millivolts (0 = none yet)
+        int8_t battery_pct_shown_ = -1;  // level shown on screen (-1 = none yet)
         void updateBattery();
         #endif
 
@@ -135,6 +137,8 @@ class InterfaceTask : public Task<InterfaceTask>, public Logger {
         uint8_t nav_nonce_ = 0;    // makes the motor apply each new menu position
         int nav_list_count_ = 0;   // items in the open looping list (0 = not a looping list)
         bool battery_low_warned_ = false;
+        UsbPower usb_power_;
+        void updateUsbPower();
         KnobSettings settings_;
         SettingsStore settings_store_;
 
@@ -154,6 +158,8 @@ class InterfaceTask : public Task<InterfaceTask>, public Logger {
         int32_t selectedIndex();
         void applySettings();
         void saveSettings();
+        void fillBluetoothList(UiScreen& ui);
+        void refreshBluetoothScreen();
         void updateHardware();
         void publishState();
         void applyConfig(PB_SmartKnobConfig& config, bool from_remote);

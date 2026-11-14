@@ -122,10 +122,15 @@ after ~4 degrees of travel; less than that still counts as a tap. Clockwise rais
 
 - **Apps:** Mac (Volume, Scroll, Arrows) and Demo (Scott's haptic behaviors). Home = Mac.
 - **Settings:** Brightness (10-100%), Click strength (20-200%, felt as you turn), Touch (rim: Track /
-  Follow / Off), Bluetooth (live status, Forget all), Calibrate, Battery, Version.
-- Menus loop around (no end stops); the ring around the edge shows where you are in the list.
-- Status line at the top: Bluetooth icon when connected, battery icon + percent.
-- Pop-ups: Bluetooth connected / disconnected, battery low (at 15%, again after charging past 25%).
+  Follow / Off), Bluetooth, Calibrate, Battery, Version.
+- **Bluetooth:** Connected / Not connected (tap: paired-device count), Add device (pairing open for
+  2 minutes, with a countdown), Forget all. Outside pairing only already-paired devices can connect
+  (`PAIRED_ONLY` in `ble_output.cpp`; set false if a paired Mac ever can't reconnect). With nothing
+  paired, pairing stays open until the first device pairs.
+- Lists slide with the knob between clicks and snap to each item. In Settings the position ring runs
+  along the bottom (first item on the left) and the status line (Bluetooth, charging, battery) shows at the top.
+- Pop-ups: Bluetooth connected / disconnected / paired / pairing closed, Charging / On battery,
+  Battery low (15%, again after charging past 25%).
 - Control screens show the app name at the top.
 - Fine volume holds Shift+Option down for a whole turn (released 0.6 s after you stop), so apps don't
   see rapid Option taps (e.g. Claude's "double-tap Option" shortcut).
@@ -154,8 +159,11 @@ Library: ESP32-BLE-CompositeHID v0.4.0 (NimBLE).
 - **On (battery):** hold the Function button 1-2 s until the screen lights, then let go.
 - **Off:** hold the Function button 2 s, then let go. On USB the knob can't switch itself off
   (USB powers it directly); it says so in the monitor and carries on.
-- **Battery:** the monitor prints `Battery: 3.92 V (about 64%)` shortly after startup and every 30 s.
-  Rough guide only: the reading sags under load, rises while charging, and means little with no battery fitted.
+- **Battery:** read every 5 s and smoothed; logged every 30 s. On battery the shown level only goes
+  down; it can rise only while plugged in. Still a rough guide: it reads high while charging, sags
+  under motor load, and means little with no battery fitted.
+- **USB / charging:** detected when plugged into a computer (the USB port's 1 ms "frame" signal keeps
+  counting). A plain wall charger can't be detected, and a sleeping Mac may stop the signal.
 
 Code: `power_button.*` (short/long press), `battery.*` (voltage to percent), `updatePowerButton()` / `updateBattery()`
 in `interface_task.cpp`. A short press is free for a future action.

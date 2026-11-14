@@ -53,9 +53,9 @@ class DisplayTask : public Task<DisplayTask> {
         lv_obj_t* value_label_ = nullptr;  // big number (control and value layouts)
         lv_obj_t* text_label_ = nullptr;   // mode name (control layout)
         lv_obj_t* title_label_ = nullptr;  // small heading (list and value layouts)
-        lv_obj_t* list_prev_ = nullptr;    // list: item above the selection (dimmed)
-        lv_obj_t* list_sel_ = nullptr;     // list: selected item
-        lv_obj_t* list_next_ = nullptr;    // list: item below the selection (dimmed)
+        lv_obj_t* list_box_ = nullptr;     // list: column of items that slides with the knob
+        lv_obj_t* list_items_[UI_MAX_ITEMS] = {};
+        float shown_scroll_ = -1000;       // list position last drawn (in items)
         lv_obj_t* info_label_ = nullptr;   // value layout: two lines of info
         lv_obj_t* status_label_ = nullptr; // top: Bluetooth + battery
         lv_obj_t* toast_label_ = nullptr;  // pop-up message

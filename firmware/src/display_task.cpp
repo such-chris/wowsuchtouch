@@ -9,6 +9,8 @@ static const uint8_t LEDC_CHANNEL_LCD_BACKLIGHT = 0;
 static const int32_t CENTER = TFT_WIDTH / 2;
 static const int32_t RING_RADIUS = CENTER - 12;   // where the position dot travels
 static const int32_t DOT_SIZE = 14;
+static const int32_t LIST_SPACING = 44;           // distance between list items (pixels)
+static const int32_t LIST_ITEM_WIDTH = 200;
 
 // Colors
 static const uint32_t COLOR_ACCENT = 0x5064C8;    // blue-violet, from Scott's dot
@@ -183,28 +185,22 @@ void DisplayTask::buildScreen() {
     lv_obj_align(title_label_, LV_ALIGN_TOP_MID, 0, 34);
     lv_label_set_text(title_label_, "");
 
-    // List: selected item big in the middle, neighbours dimmed above and below
-    list_prev_ = lv_label_create(screen);
-    lv_obj_set_style_text_font(list_prev_, &lv_font_montserrat_20, 0);
-    lv_obj_set_style_text_color(list_prev_, lv_color_hex(COLOR_TEXT_FAINT), 0);
-    lv_obj_align(list_prev_, LV_ALIGN_CENTER, 0, -46);
-
-    list_sel_ = lv_label_create(screen);
-    lv_obj_set_style_text_font(list_sel_, &lv_font_montserrat_28, 0);
-    lv_obj_set_style_text_color(list_sel_, lv_color_white(), 0);
-    lv_obj_align(list_sel_, LV_ALIGN_CENTER, 0, 0);
-
-    list_next_ = lv_label_create(screen);
-    lv_obj_set_style_text_font(list_next_, &lv_font_montserrat_20, 0);
-    lv_obj_set_style_text_color(list_next_, lv_color_hex(COLOR_TEXT_FAINT), 0);
-    lv_obj_align(list_next_, LV_ALIGN_CENTER, 0, 46);
-
-    // List items longer than the screen scroll sideways instead of being cut off
-    lv_obj_t* list_labels[] = {list_prev_, list_sel_, list_next_};
-    for (lv_obj_t* label : list_labels) {
-        lv_obj_set_width(label, 190);
-        lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
-        lv_label_set_long_mode(label, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    // List: a column of items that slides up and down with the knob. The item
+    // nearest the middle is brightest; the others fade with distance.
+    list_box_ = lv_obj_create(screen);
+    lv_obj_remove_style_all(list_box_);
+    lv_obj_set_size(list_box_, TFT_WIDTH, UI_MAX_ITEMS * LIST_SPACING);
+    lv_obj_remove_flag(list_box_, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(list_box_, LV_OBJ_FLAG_CLICKABLE);
+    for (int i = 0; i < UI_MAX_ITEMS; i++) {
+        lv_obj_t* item = lv_label_create(list_box_);
+        lv_obj_set_style_text_font(item, &lv_font_montserrat_24, 0);
+        lv_obj_set_style_text_color(item, lv_color_white(), 0);
+        lv_obj_set_style_text_align(item, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_width(item, LIST_ITEM_WIDTH);
+        lv_label_set_long_mode(item, LV_LABEL_LONG_DOT);
+        lv_obj_set_pos(item, (TFT_WIDTH - LIST_ITEM_WIDTH) / 2, i * LIST_SPACING + (LIST_SPACING - 28) / 2);
+        list_items_[i] = item;
     }
 
     // Value layout: two lines of info under the heading
@@ -247,12 +243,13 @@ void DisplayTask::applyStatus(const UiStatus& status) {
         battery = LV_SYMBOL_BATTERY_1;
     }
 
-    char text[40] = {};
+    char text[48] = {};
+    const char* bluetooth = status.bluetooth ? LV_SYMBOL_BLUETOOTH "  " : "";
+    const char* charging = status.usb ? LV_SYMBOL_CHARGE " " : "";
     if (status.battery_pct >= 0) {
-        snprintf(text, sizeof(text), "%s  %s %d%%",
-            status.bluetooth ? LV_SYMBOL_BLUETOOTH : "", battery, status.battery_pct);
+        snprintf(text, sizeof(text), "%s%s%s %d%%", bluetooth, charging, battery, status.battery_pct);
     } else {
-        snprintf(text, sizeof(text), "%s", status.bluetooth ? LV_SYMBOL_BLUETOOTH : "");
+        snprintf(text, sizeof(text), "%s%s", bluetooth, charging);
     }
     lv_label_set_text(status_label_, text);
 }
@@ -274,10 +271,19 @@ void DisplayTask::applyLayout() {
     setVisible(text_label_, control);
     setVisible(value_label_, control || (value && ui_.show_number));
     setVisible(title_label_, true);  // app name on control screens, heading elsewhere
-    setVisible(list_prev_, list);
-    setVisible(list_sel_, list);
-    setVisible(list_next_, list);
+    setVisible(list_box_, list);
     setVisible(info_label_, value && !ui_.show_number);
+    setVisible(status_label_, ui_.show_status);
+
+    if (list) {
+        for (int i = 0; i < UI_MAX_ITEMS; i++) {
+            setVisible(list_items_[i], i < ui_.item_count);
+            if (i < ui_.item_count) {
+                lv_label_set_text(list_items_[i], ui_.items[i]);
+            }
+        }
+        shown_scroll_ = -1000;
+    }
 
     lv_label_set_text(title_label_, ui_.title);
     if (value && !ui_.show_number) {
@@ -310,12 +316,18 @@ void DisplayTask::updateScreen(const PB_SmartKnobState& state) {
     bool bounded = num_positions > 0;
 
     // Angles in LVGL degrees: 0 = right, 90 = bottom, 270 = top, clockwise.
-    // Bounded modes spread their range evenly either side of the top.
+    // Bounded modes spread their range evenly either side of the top (or the
+    // bottom). Either way the first position is on the left.
     float range_degrees = bounded ? fminf((max_position - min_position) * width_degrees, 340) : 0;
-    float start_angle = 270 - range_degrees / 2;
-    float dot_angle = start_angle + (position - min_position + state.sub_position_unit) * width_degrees;
+    float middle_angle = ui_.ring_at_bottom ? 90 : 270;
+    float direction = ui_.ring_at_bottom ? -1 : 1;  // along the bottom, left-to-right is anticlockwise
+    float start_angle = middle_angle - direction * range_degrees / 2;
+    float end_angle = middle_angle + direction * range_degrees / 2;
+    float dot_angle = start_angle + direction * (position - min_position + state.sub_position_unit) * width_degrees;
+    float low_angle = fminf(start_angle, end_angle);
+    float high_angle = fmaxf(start_angle, end_angle);
     if (bounded && num_positions > 1) {
-        dot_angle = CLAMP(dot_angle, start_angle - 8, start_angle + range_degrees + 8);  // a little rubber-band past the ends
+        dot_angle = CLAMP(dot_angle, low_angle - 8, high_angle + 8);  // a little rubber-band past the ends
     }
     // (Single-position "spring" modes let the dot follow the full deflection)
 
@@ -323,9 +335,14 @@ void DisplayTask::updateScreen(const PB_SmartKnobState& state) {
     if (bounded && range_degrees > 0) {
         lv_obj_remove_flag(track_arc_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_remove_flag(fill_arc_, LV_OBJ_FLAG_HIDDEN);
-        lv_arc_set_bg_angles(track_arc_, wrapDegrees(start_angle), wrapDegrees(start_angle + range_degrees));
-        float fill_end = CLAMP(dot_angle, start_angle, start_angle + range_degrees);
-        lv_arc_set_angles(fill_arc_, wrapDegrees(start_angle), wrapDegrees(fill_end));
+        lv_arc_set_bg_angles(track_arc_, wrapDegrees(low_angle), wrapDegrees(high_angle));
+        // Arcs are drawn clockwise, so the fill goes from whichever end comes first
+        float fill_to = CLAMP(dot_angle, low_angle, high_angle);
+        if (direction > 0) {
+            lv_arc_set_angles(fill_arc_, wrapDegrees(start_angle), wrapDegrees(fill_to));
+        } else {
+            lv_arc_set_angles(fill_arc_, wrapDegrees(fill_to), wrapDegrees(start_angle));
+        }
     } else {
         lv_obj_add_flag(track_arc_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(fill_arc_, LV_OBJ_FLAG_HIDDEN);
@@ -338,17 +355,22 @@ void DisplayTask::updateScreen(const PB_SmartKnobState& state) {
     lv_obj_set_pos(dot_, x, y);
 
     if (ui_.layout == UiLayout::LIST) {
-        // Selected item and its neighbours (only redraw when the selection moves)
+        // Slide the column so the knob's position (including the part-way turn
+        // between clicks) sits in the middle, then fade items by distance
         int32_t count = ui_.item_count;
-        int32_t sel = CLAMP(position, (int32_t)0, count - 1);
-        if (count > 0 && sel != shown_value_) {
-            shown_value_ = sel;
-            // Looping lists show the neighbours around the ends too
-            int32_t prev = sel > 0 ? sel - 1 : (ui_.wrap && count > 2 ? count - 1 : -1);
-            int32_t next = sel < count - 1 ? sel + 1 : (ui_.wrap && count > 2 ? 0 : -1);
-            lv_label_set_text(list_prev_, prev >= 0 ? ui_.items[prev] : "");
-            lv_label_set_text(list_sel_, ui_.items[sel]);
-            lv_label_set_text(list_next_, next >= 0 ? ui_.items[next] : "");
+        if (count == 0) {
+            return;
+        }
+        float scroll = CLAMP(position + state.sub_position_unit, -0.4f, count - 1 + 0.4f);
+        if (fabsf(scroll - shown_scroll_) < 0.01f) {
+            return;
+        }
+        shown_scroll_ = scroll;
+        lv_obj_set_y(list_box_, (int32_t)(CENTER - LIST_SPACING / 2 - scroll * LIST_SPACING));
+        for (int32_t i = 0; i < count; i++) {
+            float distance = fabsf(i - scroll);
+            float brightness = distance < 1.6f ? 1 - 0.55f * distance : 0;
+            lv_obj_set_style_text_opa(list_items_[i], (lv_opa_t)(255 * fmaxf(brightness, 0)), 0);
         }
         return;
     }
