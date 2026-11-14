@@ -15,6 +15,14 @@
 #include "util.h"
 #include "version.h"
 
+// Icons used in pop-ups (LVGL symbols; blank if there's no screen)
+#ifndef LV_SYMBOL_BLUETOOTH
+#define LV_SYMBOL_BLUETOOTH ""
+#endif
+#ifndef LV_SYMBOL_BATTERY_1
+#define LV_SYMBOL_BATTERY_1 ""
+#endif
+
 #if SK_LEDS
 CRGB leds[NUM_LEDS];
 #endif
@@ -321,7 +329,7 @@ enum SettingItem {
     SET_COUNT,
 };
 static const char* setting_names[SET_COUNT] = {
-    "Brightness", "Haptics", "Touch", "Bluetooth", "Calibrate", "Battery", "Version",
+    "Brightness", "Click strength", "Touch", "Bluetooth", "Calibrate", "Battery", "Version",
 };
 static const char* touch_mode_names[] = {"Track", "Follow", "Off"};
 
@@ -329,15 +337,16 @@ static const char* touch_mode_names[] = {"Track", "Follow", "Off"};
 static const uint16_t EDGE_SWIPE_PX = 60;
 
 // ---- Knob feel for menus ----
-// A list: one firm click per item, end stops at the first and last item
-static PB_SmartKnobConfig makeListConfig(const char* id, int count, int selected, uint8_t nonce) {
+// A list: one click per item. Looping lists have no end stops (past the last item
+// comes back to the first); the others stop at the first and last item.
+static PB_SmartKnobConfig makeListConfig(const char* id, int count, int selected, uint8_t nonce, bool loop = false) {
     PB_SmartKnobConfig config = {};
     config.position = selected;
     config.position_nonce = nonce;
     config.min_position = 0;
-    config.max_position = count - 1;
+    config.max_position = loop ? -1 : count - 1;  // max below min = no end stops
     config.position_width_radians = 24 * PI / 180;
-    config.detent_strength_unit = 1.5;
+    config.detent_strength_unit = 0.6;
     config.endstop_strength_unit = 1;
     config.snap_point = 1.1;
     strncpy(config.text, id, sizeof(config.text) - 1);
@@ -351,7 +360,7 @@ static PB_SmartKnobConfig makeSliderConfig(const char* id, int min, int max, int
     config.max_position = max;
     config.position = CLAMP(value, min, max);
     config.position_width_radians = 10 * PI / 180;
-    config.detent_strength_unit = 0.7;
+    config.detent_strength_unit = 0.4;
     return config;
 }
 
@@ -443,6 +452,7 @@ void InterfaceTask::run() {
         ble_volume_level_ = CLAMP(settings_.volume, (int32_t)0, (int32_t)64);
     #endif
     openApp(settings_.app < APP_COUNT ? settings_.app : 0);
+    sendStatus();
     motor_task_.addListener(knob_state_queue_);
 
     plaintext_protocol_.init([this] () {
@@ -521,6 +531,10 @@ void InterfaceTask::run() {
 
         #ifdef PIN_POWER_BUTTON
             updatePowerButton();
+        #endif
+
+        #if SK_BLE
+            ble_.update(millis());
         #endif
 
         #ifdef PIN_BATTERY_ADC
@@ -837,6 +851,11 @@ void InterfaceTask::updateBleOutput() {
     if (connected != ble_was_connected_) {
         ble_was_connected_ = connected;
         log(connected ? "Bluetooth: connected" : "Bluetooth: disconnected");
+        toast(connected ? LV_SYMBOL_BLUETOOTH " Connected" : LV_SYMBOL_BLUETOOTH " Disconnected");
+        sendStatus();
+        if (nav_screen_ == NavScreen::SETTING && open_setting_ == SET_BLUETOOTH) {
+            openSetting(SET_BLUETOOTH);  // show the new status
+        }
     }
 
     // Wait until the motor has switched to the current mode, so a mode change
@@ -962,9 +981,18 @@ void InterfaceTask::updateBattery() {
     }
     battery_mv_ = (sum_mv / 16) * 2;
 
-    snprintf(buf_, sizeof(buf_), "Battery: %.2f V (about %d%%)",
-        battery_mv_ / 1000.0f, batteryPercentFromMillivolts(battery_mv_));
+    uint8_t pct = batteryPercentFromMillivolts(battery_mv_);
+    snprintf(buf_, sizeof(buf_), "Battery: %.2f V (about %d%%)", battery_mv_ / 1000.0f, pct);
     log(buf_);
+    sendStatus();
+
+    // Warn once when it gets low; warn again only after it has been charged back up
+    if (pct <= 15 && !battery_low_warned_) {
+        battery_low_warned_ = true;
+        toast(LV_SYMBOL_BATTERY_1 " Battery low");
+    } else if (pct >= 25) {
+        battery_low_warned_ = false;
+    }
 }
 #endif
 
@@ -983,6 +1011,7 @@ void InterfaceTask::setNavScreen(NavScreen screen) {
         saveSettings();  // remembers the volume level and app
     }
     nav_screen_ = screen;
+    nav_list_count_ = 0;
     #if SK_BLE
         ble_last_config_ = -1;  // start fresh when an app is shown again, so nothing is sent by mistake
     #endif
@@ -990,10 +1019,42 @@ void InterfaceTask::setNavScreen(NavScreen screen) {
 
 int32_t InterfaceTask::selectedIndex() {
     // The knob's position is the highlighted item, once the motor has switched to this menu
+    int32_t position = latest_state_.current_position;
     if (strcmp(latest_state_.config.text, latest_config_.text) != 0) {
-        return latest_config_.position;
+        position = latest_config_.position;
     }
-    return latest_state_.current_position;
+    if (nav_list_count_ > 0) {
+        // Looping list: the position keeps counting up or down, so wrap it into the list
+        position = ((position % nav_list_count_) + nav_list_count_) % nav_list_count_;
+    }
+    return position;
+}
+
+void InterfaceTask::sendStatus() {
+    UiStatus status;
+    #if SK_BLE
+        status.bluetooth = ble_.isConnected();
+    #endif
+    #ifdef PIN_BATTERY_ADC
+        if (battery_mv_ > 0) {
+            status.battery_pct = batteryPercentFromMillivolts(battery_mv_);
+        }
+    #endif
+    #if SK_DISPLAY
+        if (display_task_ != nullptr) {
+            display_task_->showStatus(status);
+        }
+    #endif
+}
+
+void InterfaceTask::toast(const char* text) {
+    UiToast message;
+    copyText(message.text, text);
+    #if SK_DISPLAY
+        if (display_task_ != nullptr) {
+            display_task_->showToast(message);
+        }
+    #endif
 }
 
 void InterfaceTask::goHome() {
@@ -1014,6 +1075,7 @@ void InterfaceTask::openApp(int app) {
 void InterfaceTask::applyAppPage() {
     UiScreen ui;
     ui.layout = UiLayout::CONTROL;
+    copyText(ui.title, apps[current_app_].name);
     showUi(ui);
 
     #if SK_BLE
@@ -1035,11 +1097,13 @@ void InterfaceTask::openAppsList() {
     ui.layout = UiLayout::LIST;
     copyText(ui.title, "Apps");
     ui.item_count = APP_COUNT;
+    ui.wrap = true;
     for (int i = 0; i < APP_COUNT; i++) {
         copyText(ui.items[i], apps[i].name);
     }
     showUi(ui);
-    PB_SmartKnobConfig config = makeListConfig("Apps", APP_COUNT, current_app_, ++nav_nonce_);
+    nav_list_count_ = APP_COUNT;
+    PB_SmartKnobConfig config = makeListConfig("Apps", APP_COUNT, current_app_, ++nav_nonce_, true);
     applyConfig(config, false);
 }
 
@@ -1049,11 +1113,13 @@ void InterfaceTask::openSettingsList(int selected) {
     ui.layout = UiLayout::LIST;
     copyText(ui.title, "Settings");
     ui.item_count = SET_COUNT;
+    ui.wrap = true;
     for (int i = 0; i < SET_COUNT; i++) {
         copyText(ui.items[i], setting_names[i]);
     }
     showUi(ui);
-    PB_SmartKnobConfig config = makeListConfig("Settings", SET_COUNT, selected, ++nav_nonce_);
+    nav_list_count_ = SET_COUNT;
+    PB_SmartKnobConfig config = makeListConfig("Settings", SET_COUNT, selected, ++nav_nonce_, true);
     applyConfig(config, false);
 }
 
@@ -1075,20 +1141,22 @@ void InterfaceTask::openSetting(int item) {
             config = makeSliderConfig("Brightness", 2, 20, settings_.brightness_pct / 5, ++nav_nonce_);
             break;
         case SET_HAPTICS:
-            // 20-200% in steps of 10; takes effect when you leave
+            // 20-200% in steps of 10; you feel the new strength as you turn
             ui.layout = UiLayout::VALUE;
             ui.show_number = true;
             ui.number_multiplier = 10;
             copyText(ui.suffix, "%");
-            config = makeSliderConfig("Haptics", 2, 20, settings_.haptics_pct / 10, ++nav_nonce_);
+            config = makeSliderConfig("Click strength", 2, 20, settings_.haptics_pct / 10, ++nav_nonce_);
             break;
         case SET_TOUCH:
             ui.layout = UiLayout::LIST;
             ui.item_count = COUNT_OF(touch_mode_names);
+            ui.wrap = true;
             for (int i = 0; i < ui.item_count; i++) {
                 copyText(ui.items[i], touch_mode_names[i]);
             }
-            config = makeListConfig("Touch", ui.item_count, settings_.touch_mode, ++nav_nonce_);
+            nav_list_count_ = ui.item_count;
+            config = makeListConfig("Touch", ui.item_count, settings_.touch_mode, ++nav_nonce_, true);
             break;
         case SET_BLUETOOTH: {
             bool connected = false;
@@ -1097,9 +1165,11 @@ void InterfaceTask::openSetting(int item) {
             #endif
             ui.layout = UiLayout::LIST;
             ui.item_count = 2;
+            ui.wrap = true;
             copyText(ui.items[0], connected ? "Connected" : "Not connected");
             copyText(ui.items[1], "Forget all");
-            config = makeListConfig("Bluetooth", 2, 0, ++nav_nonce_);
+            nav_list_count_ = 2;
+            config = makeListConfig("Bluetooth", 2, 0, ++nav_nonce_, true);
             break;
         }
         case SET_CALIBRATE:
@@ -1181,9 +1251,6 @@ void InterfaceTask::navSelect() {
 void InterfaceTask::navBack() {
     switch (nav_screen_) {
         case NavScreen::SETTING:
-            if (open_setting_ == SET_HAPTICS) {
-                applySettings();  // new strength takes effect from here on
-            }
             saveSettings();
             openSettingsList(open_setting_);
             break;
@@ -1205,7 +1272,16 @@ void InterfaceTask::updateLiveSetting() {
     if (open_setting_ == SET_BRIGHTNESS) {
         settings_.brightness_pct = CLAMP(position, (int32_t)2, (int32_t)20) * 5;
     } else if (open_setting_ == SET_HAPTICS) {
-        settings_.haptics_pct = CLAMP(position, (int32_t)2, (int32_t)20) * 10;
+        uint8_t pct = CLAMP(position, (int32_t)2, (int32_t)20) * 10;
+        if (pct != settings_.haptics_pct) {
+            // Re-apply this slider with the new strength so you feel it while turning
+            settings_.haptics_pct = pct;
+            PB_SmartKnobConfig config = latest_config_;
+            config.position = position;
+            config.sub_position_unit = 0;
+            config.position_nonce = ++nav_nonce_;
+            applyConfig(config, false);
+        }
     }
 }
 

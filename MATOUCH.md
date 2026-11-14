@@ -121,8 +121,14 @@ after ~4 degrees of travel; less than that still counts as a tap. Clockwise rais
 ## Apps and settings
 
 - **Apps:** Mac (Volume, Scroll, Arrows) and Demo (Scott's haptic behaviors). Home = Mac.
-- **Settings:** Brightness (10-100%), Haptics (20-200%, applies when you leave), Touch (rim: Track /
-  Follow / Off), Bluetooth (status, Forget all), Calibrate, Battery, Version.
+- **Settings:** Brightness (10-100%), Click strength (20-200%, felt as you turn), Touch (rim: Track /
+  Follow / Off), Bluetooth (live status, Forget all), Calibrate, Battery, Version.
+- Menus loop around (no end stops); the ring around the edge shows where you are in the list.
+- Status line at the top: Bluetooth icon when connected, battery icon + percent.
+- Pop-ups: Bluetooth connected / disconnected, battery low (at 15%, again after charging past 25%).
+- Control screens show the app name at the top.
+- Fine volume holds Shift+Option down for a whole turn (released 0.6 s after you stop), so apps don't
+  see rapid Option taps (e.g. Claude's "double-tap Option" shortcut).
 - Saved on the knob (ESP32 Preferences): brightness, haptics, touch mode, Volume level, last app.
 - Code: navigation section at the end of `interface_task.cpp`; layouts in `display_task.cpp`
   (`UiScreen` in `ui_screen.h`); storage in `settings_store.*`; version in `version.h`.

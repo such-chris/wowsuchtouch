@@ -133,11 +133,15 @@ class InterfaceTask : public Task<InterfaceTask>, public Logger {
         int current_app_ = 0;      // index into apps[]
         int open_setting_ = 0;     // which setting is open (SETTING screen)
         uint8_t nav_nonce_ = 0;    // makes the motor apply each new menu position
+        int nav_list_count_ = 0;   // items in the open looping list (0 = not a looping list)
+        bool battery_low_warned_ = false;
         KnobSettings settings_;
         SettingsStore settings_store_;
 
         void setNavScreen(NavScreen screen);
         void showUi(const UiScreen& screen);
+        void sendStatus();
+        void toast(const char* text);
         void goHome();
         void openApp(int app);
         void applyAppPage();

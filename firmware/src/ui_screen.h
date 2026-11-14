@@ -21,6 +21,7 @@ struct UiScreen {
 
     // LIST: one label per knob position (0 = first)
     uint8_t item_count = 0;
+    bool wrap = false;  // turning past the last item comes back to the first
     char items[UI_MAX_ITEMS][UI_TEXT_LEN] = {};
 
     // VALUE: shows (knob position x multiplier) + suffix, or line1/line2 if show_number is false
@@ -29,4 +30,16 @@ struct UiScreen {
     char suffix[6] = {};
     char line1[UI_TEXT_LEN] = {};
     char line2[UI_TEXT_LEN] = {};
+};
+
+// Status line at the top of every screen
+struct UiStatus {
+    bool bluetooth = false;   // connected to a Mac / iPad
+    int8_t battery_pct = -1;  // -1 = no reading
+};
+
+// A short message that pops up and fades away
+struct UiToast {
+    char text[UI_TEXT_LEN] = {};
+    uint16_t duration_ms = 1500;
 };

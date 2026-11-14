@@ -51,6 +51,12 @@ DisplayTask::DisplayTask(const uint8_t task_core) : Task{"Display", 8192, 1, tas
     ui_screen_queue_ = xQueueCreate(1, sizeof(UiScreen));
     assert(ui_screen_queue_ != NULL);
 
+    ui_status_queue_ = xQueueCreate(1, sizeof(UiStatus));
+    assert(ui_status_queue_ != NULL);
+
+    ui_toast_queue_ = xQueueCreate(1, sizeof(UiToast));
+    assert(ui_toast_queue_ != NULL);
+
     mutex_ = xSemaphoreCreateMutex();
     assert(mutex_ != NULL);
 }
@@ -58,6 +64,8 @@ DisplayTask::DisplayTask(const uint8_t task_core) : Task{"Display", 8192, 1, tas
 DisplayTask::~DisplayTask() {
     vQueueDelete(knob_state_queue_);
     vQueueDelete(ui_screen_queue_);
+    vQueueDelete(ui_status_queue_);
+    vQueueDelete(ui_toast_queue_);
     vSemaphoreDelete(mutex_);
 }
 
@@ -89,6 +97,25 @@ void DisplayTask::run() {
         }
         if (xQueueReceive(knob_state_queue_, &last_state_, 0) == pdTRUE) {
             updateScreen(last_state_);
+        }
+
+        UiStatus status;
+        if (xQueueReceive(ui_status_queue_, &status, 0) == pdTRUE) {
+            applyStatus(status);
+        }
+
+        // Pop-up: show it, then fade it out when its time is up
+        UiToast toast;
+        if (xQueueReceive(ui_toast_queue_, &toast, 0) == pdTRUE) {
+            lv_anim_delete(toast_label_, NULL);  // stop any fade already running
+            lv_label_set_text(toast_label_, toast.text);
+            lv_obj_set_style_opa(toast_label_, LV_OPA_COVER, 0);
+            lv_obj_remove_flag(toast_label_, LV_OBJ_FLAG_HIDDEN);
+            toast_hide_ms_ = millis() + toast.duration_ms;
+        }
+        if (toast_hide_ms_ != 0 && (int32_t)(millis() - toast_hide_ms_) >= 0) {
+            toast_hide_ms_ = 0;
+            lv_obj_fade_out(toast_label_, 300, 0);
         }
 
         lv_timer_handler();  // LVGL redraws whatever changed
@@ -172,12 +199,62 @@ void DisplayTask::buildScreen() {
     lv_obj_set_style_text_color(list_next_, lv_color_hex(COLOR_TEXT_FAINT), 0);
     lv_obj_align(list_next_, LV_ALIGN_CENTER, 0, 46);
 
+    // List items longer than the screen scroll sideways instead of being cut off
+    lv_obj_t* list_labels[] = {list_prev_, list_sel_, list_next_};
+    for (lv_obj_t* label : list_labels) {
+        lv_obj_set_width(label, 190);
+        lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_long_mode(label, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    }
+
     // Value layout: two lines of info under the heading
     info_label_ = lv_label_create(screen);
     lv_obj_set_style_text_font(info_label_, &lv_font_montserrat_20, 0);
     lv_obj_set_style_text_color(info_label_, lv_color_white(), 0);
     lv_obj_set_style_text_align(info_label_, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(info_label_, LV_ALIGN_CENTER, 0, 6);
+
+    // Status line at the very top: Bluetooth and battery
+    status_label_ = lv_label_create(screen);
+    lv_obj_set_style_text_font(status_label_, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(status_label_, lv_color_hex(COLOR_TEXT_DIM), 0);
+    lv_obj_align(status_label_, LV_ALIGN_TOP_MID, 0, 12);
+    lv_label_set_text(status_label_, "");
+
+    // Pop-up message: a rounded pill near the bottom, on top of everything
+    toast_label_ = lv_label_create(screen);
+    lv_obj_set_style_text_font(toast_label_, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(toast_label_, lv_color_white(), 0);
+    lv_obj_set_style_bg_color(toast_label_, lv_color_hex(0x26263A), 0);
+    lv_obj_set_style_bg_opa(toast_label_, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(toast_label_, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_pad_hor(toast_label_, 14, 0);
+    lv_obj_set_style_pad_ver(toast_label_, 6, 0);
+    lv_obj_align(toast_label_, LV_ALIGN_BOTTOM_MID, 0, -30);
+    lv_obj_add_flag(toast_label_, LV_OBJ_FLAG_HIDDEN);
+}
+
+void DisplayTask::applyStatus(const UiStatus& status) {
+    // Built-in LVGL symbols: Bluetooth, and a battery that empties in 4 steps
+    const char* battery = LV_SYMBOL_BATTERY_EMPTY;
+    if (status.battery_pct >= 80) {
+        battery = LV_SYMBOL_BATTERY_FULL;
+    } else if (status.battery_pct >= 55) {
+        battery = LV_SYMBOL_BATTERY_3;
+    } else if (status.battery_pct >= 30) {
+        battery = LV_SYMBOL_BATTERY_2;
+    } else if (status.battery_pct >= 10) {
+        battery = LV_SYMBOL_BATTERY_1;
+    }
+
+    char text[40] = {};
+    if (status.battery_pct >= 0) {
+        snprintf(text, sizeof(text), "%s  %s %d%%",
+            status.bluetooth ? LV_SYMBOL_BLUETOOTH : "", battery, status.battery_pct);
+    } else {
+        snprintf(text, sizeof(text), "%s", status.bluetooth ? LV_SYMBOL_BLUETOOTH : "");
+    }
+    lv_label_set_text(status_label_, text);
 }
 
 static void setVisible(lv_obj_t* obj, bool visible) {
@@ -196,7 +273,7 @@ void DisplayTask::applyLayout() {
 
     setVisible(text_label_, control);
     setVisible(value_label_, control || (value && ui_.show_number));
-    setVisible(title_label_, list || value);
+    setVisible(title_label_, true);  // app name on control screens, heading elsewhere
     setVisible(list_prev_, list);
     setVisible(list_sel_, list);
     setVisible(list_next_, list);
@@ -216,14 +293,27 @@ void DisplayTask::applyLayout() {
 void DisplayTask::updateScreen(const PB_SmartKnobState& state) {
     const PB_SmartKnobConfig& config = state.config;
     float width_degrees = config.position_width_radians * 180 / PI;
-    int32_t num_positions = config.max_position - config.min_position + 1;
+
+    // Position and range the ring shows. A looping list turns forever, so show
+    // where you are within the list instead (first item at the left end).
+    int32_t position = state.current_position;
+    int32_t min_position = config.min_position;
+    int32_t max_position = config.max_position;
+    bool looping_list = ui_.layout == UiLayout::LIST && ui_.wrap && ui_.item_count > 0;
+    if (looping_list) {
+        int32_t count = ui_.item_count;
+        position = ((position % count) + count) % count;
+        min_position = 0;
+        max_position = count - 1;
+    }
+    int32_t num_positions = max_position - min_position + 1;
     bool bounded = num_positions > 0;
 
     // Angles in LVGL degrees: 0 = right, 90 = bottom, 270 = top, clockwise.
     // Bounded modes spread their range evenly either side of the top.
-    float range_degrees = bounded ? fminf((config.max_position - config.min_position) * width_degrees, 340) : 0;
+    float range_degrees = bounded ? fminf((max_position - min_position) * width_degrees, 340) : 0;
     float start_angle = 270 - range_degrees / 2;
-    float dot_angle = start_angle + (state.current_position - config.min_position + state.sub_position_unit) * width_degrees;
+    float dot_angle = start_angle + (position - min_position + state.sub_position_unit) * width_degrees;
     if (bounded && num_positions > 1) {
         dot_angle = CLAMP(dot_angle, start_angle - 8, start_angle + range_degrees + 8);  // a little rubber-band past the ends
     }
@@ -250,12 +340,15 @@ void DisplayTask::updateScreen(const PB_SmartKnobState& state) {
     if (ui_.layout == UiLayout::LIST) {
         // Selected item and its neighbours (only redraw when the selection moves)
         int32_t count = ui_.item_count;
-        int32_t sel = CLAMP(state.current_position, (int32_t)0, count - 1);
+        int32_t sel = CLAMP(position, (int32_t)0, count - 1);
         if (count > 0 && sel != shown_value_) {
             shown_value_ = sel;
-            lv_label_set_text(list_prev_, sel > 0 ? ui_.items[sel - 1] : "");
+            // Looping lists show the neighbours around the ends too
+            int32_t prev = sel > 0 ? sel - 1 : (ui_.wrap && count > 2 ? count - 1 : -1);
+            int32_t next = sel < count - 1 ? sel + 1 : (ui_.wrap && count > 2 ? 0 : -1);
+            lv_label_set_text(list_prev_, prev >= 0 ? ui_.items[prev] : "");
             lv_label_set_text(list_sel_, ui_.items[sel]);
-            lv_label_set_text(list_next_, sel < count - 1 ? ui_.items[sel + 1] : "");
+            lv_label_set_text(list_next_, next >= 0 ? ui_.items[next] : "");
         }
         return;
     }
@@ -287,6 +380,14 @@ void DisplayTask::updateScreen(const PB_SmartKnobState& state) {
 
 void DisplayTask::showScreen(const UiScreen& screen) {
     xQueueOverwrite(ui_screen_queue_, &screen);
+}
+
+void DisplayTask::showStatus(const UiStatus& status) {
+    xQueueOverwrite(ui_status_queue_, &status);
+}
+
+void DisplayTask::showToast(const UiToast& toast) {
+    xQueueOverwrite(ui_toast_queue_, &toast);
 }
 
 QueueHandle_t DisplayTask::getKnobStateQueue() {

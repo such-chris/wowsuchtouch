@@ -2,6 +2,8 @@
 
 #include "ble_output.h"
 
+#include <Arduino.h>
+
 #include <BleCompositeHID.h>
 #include <KeyboardDevice.h>
 #include <MouseDevice.h>
@@ -38,19 +40,39 @@ bool BleOutput::isConnected() {
     return hid_ != nullptr && hid_->isConnected();
 }
 
-void BleOutput::tapMediaKey(uint32_t media_key, uint8_t modifiers) {
-    if (modifiers) {
-        keyboard_->modifierKeyPress(modifiers);
-        keyboard_->sendKeyReport();
+// Let go of held modifiers after the knob has been still this long
+static const uint32_t MODIFIER_RELEASE_MS = 600;
+
+void BleOutput::holdModifiers(uint8_t modifiers) {
+    if (modifiers != held_modifiers_) {
+        releaseModifiers();
+        if (modifiers) {
+            keyboard_->modifierKeyPress(modifiers);
+            keyboard_->sendKeyReport();
+            held_modifiers_ = modifiers;
+        }
     }
+}
+
+void BleOutput::releaseModifiers() {
+    if (held_modifiers_) {
+        keyboard_->modifierKeyRelease(held_modifiers_);
+        keyboard_->sendKeyReport();
+        held_modifiers_ = 0;
+    }
+}
+
+void BleOutput::update(uint32_t now_ms) {
+    if (held_modifiers_ && now_ms - last_hold_use_ms_ > MODIFIER_RELEASE_MS) {
+        releaseModifiers();
+    }
+}
+
+void BleOutput::tapMediaKey(uint32_t media_key) {
     keyboard_->mediaKeyPress(media_key);
     keyboard_->sendMediaKeyReport();
     keyboard_->mediaKeyRelease(media_key);
     keyboard_->sendMediaKeyReport();
-    if (modifiers) {
-        keyboard_->modifierKeyRelease(modifiers);
-        keyboard_->sendKeyReport();
-    }
 }
 
 void BleOutput::tapKey(uint8_t key) {
@@ -64,14 +86,16 @@ void BleOutput::volumeSteps(int32_t steps, bool fine) {
     if (!isConnected()) return;
     steps = limitSteps(steps);
     uint32_t key = steps > 0 ? KEY_MEDIA_VOLUMEUP : KEY_MEDIA_VOLUMEDOWN;
-    uint8_t modifiers = fine ? (KEY_MOD_LSHIFT | KEY_MOD_LALT) : 0;
+    holdModifiers(fine ? (KEY_MOD_LSHIFT | KEY_MOD_LALT) : 0);
+    last_hold_use_ms_ = millis();
     for (int32_t i = 0; i < abs(steps); i++) {
-        tapMediaKey(key, modifiers);
+        tapMediaKey(key);
     }
 }
 
 void BleOutput::scrollSteps(int32_t steps) {
     if (!isConnected()) return;
+    releaseModifiers();  // a held Shift would turn this into sideways scrolling
     steps = limitSteps(steps);
     // Clockwise scrolls down the page (wheel value is negative for "down")
     mouse_->mouseMove(0, 0, 0, (signed char)(-steps));
@@ -81,6 +105,7 @@ void BleOutput::scrollSteps(int32_t steps) {
 
 void BleOutput::arrowSteps(int32_t steps) {
     if (!isConnected()) return;
+    releaseModifiers();
     steps = limitSteps(steps);
     uint8_t key = steps > 0 ? KEY_RIGHT : KEY_LEFT;
     for (int32_t i = 0; i < abs(steps); i++) {

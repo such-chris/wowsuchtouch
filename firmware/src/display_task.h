@@ -26,6 +26,8 @@ class DisplayTask : public Task<DisplayTask> {
 
         // Switch what the screen shows (control / list / value). Safe to call from other tasks.
         void showScreen(const UiScreen& screen);
+        void showStatus(const UiStatus& status);
+        void showToast(const UiToast& toast);
         void setLogger(Logger* logger);
 
     protected:
@@ -36,6 +38,8 @@ class DisplayTask : public Task<DisplayTask> {
 
         QueueHandle_t knob_state_queue_;
         QueueHandle_t ui_screen_queue_;
+        QueueHandle_t ui_status_queue_;
+        QueueHandle_t ui_toast_queue_;
 
         SemaphoreHandle_t mutex_;
         uint16_t brightness_;
@@ -53,6 +57,10 @@ class DisplayTask : public Task<DisplayTask> {
         lv_obj_t* list_sel_ = nullptr;     // list: selected item
         lv_obj_t* list_next_ = nullptr;    // list: item below the selection (dimmed)
         lv_obj_t* info_label_ = nullptr;   // value layout: two lines of info
+        lv_obj_t* status_label_ = nullptr; // top: Bluetooth + battery
+        lv_obj_t* toast_label_ = nullptr;  // pop-up message
+        uint32_t toast_hide_ms_ = 0;       // when the current pop-up should fade (0 = none showing)
+        void applyStatus(const UiStatus& status);
         void buildScreen();
         void applyLayout();
         void updateScreen(const PB_SmartKnobState& state);

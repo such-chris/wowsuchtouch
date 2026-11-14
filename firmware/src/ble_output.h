@@ -21,8 +21,19 @@ class BleOutput {
         // Forget every paired Mac/iPad (they'll need to pair again)
         void forgetAllDevices();
 
+        // Call often: lets go of held modifier keys once the knob has been still a moment
+        void update(uint32_t now_ms);
+
     private:
-        void tapMediaKey(uint32_t media_key, uint8_t modifiers);
+        // Fine volume needs Shift+Option held. Pressing them for every click makes
+        // rapid Option taps, which apps can read as a shortcut (e.g. "double-tap Option"
+        // opens Claude). So they're held down for a whole burst and let go after a pause.
+        void holdModifiers(uint8_t modifiers);
+        void releaseModifiers();
+        uint8_t held_modifiers_ = 0;
+        uint32_t last_hold_use_ms_ = 0;
+
+        void tapMediaKey(uint32_t media_key);
         void tapKey(uint8_t key);
 
         BleCompositeHID* hid_ = nullptr;
