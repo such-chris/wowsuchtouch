@@ -3,205 +3,201 @@
 #include "semaphore_guard.h"
 #include "util.h"
 
-#include "font/roboto_light_60.h"
-
 static const uint8_t LEDC_CHANNEL_LCD_BACKLIGHT = 0;
 
-DisplayTask::DisplayTask(const uint8_t task_core) : Task{"Display", 2048, 1, task_core} {
-  knob_state_queue_ = xQueueCreate(1, sizeof(PB_SmartKnobState));
-  assert(knob_state_queue_ != NULL);
+// Screen geometry
+static const int32_t CENTER = TFT_WIDTH / 2;
+static const int32_t RING_RADIUS = CENTER - 12;   // where the position dot travels
+static const int32_t DOT_SIZE = 14;
 
-  mutex_ = xSemaphoreCreateMutex();
-  assert(mutex_ != NULL);
+// Colors
+static const uint32_t COLOR_ACCENT = 0x5064C8;    // blue-violet, from Scott's dot
+static const uint32_t COLOR_TRACK = 0x2A2A33;
+static const uint32_t COLOR_TEXT_DIM = 0x9A9AA8;
+
+// LVGL draws into this buffer a strip at a time; each strip is then sent to the screen.
+// 24 rows: 240 x 24 pixels x 2 bytes = 11.5 KB
+static const uint16_t DRAW_BUFFER_ROWS = 24;
+static uint16_t draw_buffer[TFT_WIDTH * DRAW_BUFFER_ROWS];
+
+static TFT_eSPI* flush_tft = nullptr;
+
+// Called by LVGL with a finished strip of pixels
+static void flushToScreen(lv_display_t* display, const lv_area_t* area, uint8_t* pixels) {
+    uint32_t width = area->x2 - area->x1 + 1;
+    uint32_t height = area->y2 - area->y1 + 1;
+    flush_tft->startWrite();
+    flush_tft->setAddrWindow(area->x1, area->y1, width, height);
+    flush_tft->pushColors((uint16_t*)pixels, width * height, true);  // true = swap byte order
+    flush_tft->endWrite();
+    lv_display_flush_ready(display);
+}
+
+// Keep an angle within 0-360 (LVGL arcs expect that; they still draw across the top)
+static int32_t wrapDegrees(float degrees) {
+    int32_t wrapped = ((int32_t)lroundf(degrees)) % 360;
+    return wrapped < 0 ? wrapped + 360 : wrapped;
+}
+
+static uint32_t lvglTick() {
+    return millis();
+}
+
+DisplayTask::DisplayTask(const uint8_t task_core) : Task{"Display", 8192, 1, task_core} {
+    knob_state_queue_ = xQueueCreate(1, sizeof(PB_SmartKnobState));
+    assert(knob_state_queue_ != NULL);
+
+    mutex_ = xSemaphoreCreateMutex();
+    assert(mutex_ != NULL);
 }
 
 DisplayTask::~DisplayTask() {
-  vQueueDelete(knob_state_queue_);
-  vSemaphoreDelete(mutex_);
-}
-
-static void drawPlayButton(TFT_eSprite& spr, int x, int y, int width, int height, uint16_t color) {
-  spr.fillTriangle(
-    x, y - height / 2,
-    x, y + height / 2,
-    x + width, y,
-    color
-  );
+    vQueueDelete(knob_state_queue_);
+    vSemaphoreDelete(mutex_);
 }
 
 void DisplayTask::run() {
     tft_.begin();
     tft_.invertDisplay(1);
     tft_.setRotation(SK_DISPLAY_ROTATION);
-    tft_.fillScreen(TFT_DARKGREEN);
+    tft_.fillScreen(TFT_BLACK);
 
     ledcSetup(LEDC_CHANNEL_LCD_BACKLIGHT, 5000, SK_BACKLIGHT_BIT_DEPTH);
     ledcAttachPin(PIN_LCD_BACKLIGHT, LEDC_CHANNEL_LCD_BACKLIGHT);
     ledcWrite(LEDC_CHANNEL_LCD_BACKLIGHT, (1 << SK_BACKLIGHT_BIT_DEPTH) - 1);
 
-    spr_.setColorDepth(8);
+    lv_init();
+    lv_tick_set_cb(lvglTick);
+    flush_tft = &tft_;
+    lv_display_t* display = lv_display_create(TFT_WIDTH, TFT_HEIGHT);
+    lv_display_set_flush_cb(display, flushToScreen);
+    lv_display_set_buffers(display, draw_buffer, NULL, sizeof(draw_buffer), LV_DISPLAY_RENDER_MODE_PARTIAL);
 
-    if (spr_.createSprite(TFT_WIDTH, TFT_HEIGHT) == nullptr) {
-      log("ERROR: sprite allocation failed!");
-      tft_.fillScreen(TFT_RED);
-    } else {
-      log("Sprite created!");
-      tft_.fillScreen(TFT_PURPLE);
-    }
-    spr_.setTextColor(0xFFFF, TFT_BLACK);
-    
+    buildScreen();
+    log("Display: LVGL running");
+
     PB_SmartKnobState state;
-
-    const int RADIUS = TFT_WIDTH / 2;
-    const uint16_t FILL_COLOR = spr_.color565(90, 18, 151);
-    const uint16_t DOT_COLOR = spr_.color565(80, 100, 200);
-
-    spr_.setTextDatum(CC_DATUM);
-    spr_.setTextColor(TFT_WHITE);
-    while(1) {
-        if (xQueueReceive(knob_state_queue_, &state, portMAX_DELAY) == pdFALSE) {
-          continue;
+    while (1) {
+        if (xQueueReceive(knob_state_queue_, &state, 0) == pdTRUE) {
+            updateScreen(state);
         }
 
-        spr_.fillSprite(TFT_BLACK);
-
-        int32_t num_positions = state.config.max_position - state.config.min_position + 1;
-        float adjusted_sub_position = state.sub_position_unit * state.config.position_width_radians;
-        if (num_positions > 0) {
-          if (state.current_position == state.config.min_position && state.sub_position_unit < 0) {
-            adjusted_sub_position = -logf(1 - state.sub_position_unit  * state.config.position_width_radians / 5 / PI * 180) * 5 * PI / 180;
-          } else if (state.current_position == state.config.max_position && state.sub_position_unit > 0) {
-            adjusted_sub_position = logf(1 + state.sub_position_unit  * state.config.position_width_radians / 5 / PI * 180)  * 5 * PI / 180;
-          }
-        }
-
-        float left_bound = PI / 2;
-        float right_bound = 0;
-        if (num_positions > 0) {
-          float range_radians = (state.config.max_position - state.config.min_position) * state.config.position_width_radians;
-          left_bound = PI / 2 + range_radians / 2;
-          right_bound = PI / 2 - range_radians / 2;
-        }
-        float raw_angle = left_bound - (state.current_position - state.config.min_position) * state.config.position_width_radians;
-        float adjusted_angle = raw_angle - adjusted_sub_position;
-        
-        bool sk_demo_mode = strncmp(state.config.text, "SKDEMO_", 7) == 0;
-
-        if (!sk_demo_mode) {
-          if (num_positions > 1) {
-            int32_t height = (state.current_position - state.config.min_position) * TFT_HEIGHT / (state.config.max_position - state.config.min_position);
-            spr_.fillRect(0, TFT_HEIGHT - height, TFT_WIDTH, height, FILL_COLOR);
-          }
-
-          spr_.setFreeFont(&Roboto_Light_60);
-          spr_.drawNumber(state.current_position, TFT_WIDTH / 2, TFT_HEIGHT / 2 - VALUE_OFFSET, 1);
-          spr_.setFreeFont(&DESCRIPTION_FONT);
-          int32_t line_y = TFT_HEIGHT / 2 + DESCRIPTION_Y_OFFSET;
-          char* start = state.config.text;
-          char* end = start + strlen(state.config.text);
-          while (start < end) {
-            char* newline = strchr(start, '\n');
-            if (newline == nullptr) {
-              newline = end;
-            }
-            
-            char buf[sizeof(state.config.text)] = {};
-            strncat(buf, start, min(sizeof(buf) - 1, (size_t)(newline - start)));
-            spr_.drawString(String(buf), TFT_WIDTH / 2, line_y, 1);
-            start = newline + 1;
-            line_y += spr_.fontHeight(1);
-          }
-
-          if (num_positions > 0) {
-            spr_.drawLine(TFT_WIDTH/2 + RADIUS * cosf(left_bound), TFT_HEIGHT/2 - RADIUS * sinf(left_bound), TFT_WIDTH/2 + (RADIUS - 10) * cosf(left_bound), TFT_HEIGHT/2 - (RADIUS - 10) * sinf(left_bound), TFT_WHITE);
-            spr_.drawLine(TFT_WIDTH/2 + RADIUS * cosf(right_bound), TFT_HEIGHT/2 - RADIUS * sinf(right_bound), TFT_WIDTH/2 + (RADIUS - 10) * cosf(right_bound), TFT_HEIGHT/2 - (RADIUS - 10) * sinf(right_bound), TFT_WHITE);
-          }
-          if (DRAW_ARC) {
-            spr_.drawCircle(TFT_WIDTH/2, TFT_HEIGHT/2, RADIUS, TFT_DARKGREY);
-          }
-
-          if (num_positions > 0 && ((state.current_position == state.config.min_position && state.sub_position_unit < 0) || (state.current_position == state.config.max_position && state.sub_position_unit > 0))) {
-            spr_.fillCircle(TFT_WIDTH/2 + (RADIUS - 10) * cosf(raw_angle), TFT_HEIGHT/2 - (RADIUS - 10) * sinf(raw_angle), 5, DOT_COLOR);
-            if (raw_angle < adjusted_angle) {
-              for (float r = raw_angle; r <= adjusted_angle; r += 2 * PI / 180) {
-                spr_.fillCircle(TFT_WIDTH/2 + (RADIUS - 10) * cosf(r), TFT_HEIGHT/2 - (RADIUS - 10) * sinf(r), 2, DOT_COLOR);
-              }
-              spr_.fillCircle(TFT_WIDTH/2 + (RADIUS - 10) * cosf(adjusted_angle), TFT_HEIGHT/2 - (RADIUS - 10) * sinf(adjusted_angle), 2, DOT_COLOR);
-            } else {
-              for (float r = raw_angle; r >= adjusted_angle; r -= 2 * PI / 180) {
-                spr_.fillCircle(TFT_WIDTH/2 + (RADIUS - 10) * cosf(r), TFT_HEIGHT/2 - (RADIUS - 10) * sinf(r), 2, DOT_COLOR);
-              }
-              spr_.fillCircle(TFT_WIDTH/2 + (RADIUS - 10) * cosf(adjusted_angle), TFT_HEIGHT/2 - (RADIUS - 10) * sinf(adjusted_angle), 2, DOT_COLOR);
-            }
-          } else {
-            spr_.fillCircle(TFT_WIDTH/2 + (RADIUS - 10) * cosf(adjusted_angle), TFT_HEIGHT/2 - (RADIUS - 10) * sinf(adjusted_angle), 5, DOT_COLOR);
-          }
-        } else {
-          if (strncmp(state.config.text, "SKDEMO_Scroll", 13) == 0) {
-            spr_.fillRect(0, 0, TFT_WIDTH, TFT_HEIGHT, spr_.color565(150, 0, 0));
-            spr_.setFreeFont(&Roboto_Thin_24);
-            spr_.drawString("Scroll", TFT_WIDTH / 2, TFT_HEIGHT / 2, 1);
-            bool detent = false;
-            for (uint8_t i = 0; i < state.config.detent_positions_count; i++) {
-              if (state.config.detent_positions[i] == state.current_position) {
-                detent = true;
-                break;
-              }
-            }
-            spr_.fillCircle(TFT_WIDTH/2 + (RADIUS - 16) * cosf(adjusted_angle), TFT_HEIGHT/2 - (RADIUS - 16) * sinf(adjusted_angle), detent ? 8 : 5, TFT_WHITE);
-          } else if (strncmp(state.config.text, "SKDEMO_Frames", 13) == 0) {
-            int32_t width = (state.current_position - state.config.min_position) * TFT_WIDTH / (state.config.max_position - state.config.min_position);
-            spr_.fillRect(0, 0, width, TFT_HEIGHT, spr_.color565(0, 150, 0));
-            spr_.setFreeFont(&Roboto_Light_60);
-            spr_.drawNumber(state.current_position, TFT_WIDTH / 2, TFT_HEIGHT / 2, 1);
-            spr_.setFreeFont(&Roboto_Thin_24);
-            spr_.drawString("Frame", TFT_WIDTH / 2, TFT_HEIGHT / 2 - DESCRIPTION_Y_OFFSET - VALUE_OFFSET, 1);
-          } else if (strncmp(state.config.text, "SKDEMO_Speed", 12) == 0) {
-            spr_.fillRect(0, 0, TFT_WIDTH, TFT_HEIGHT, spr_.color565(0, 0, 150));
-
-            float normalizedFractional = sgn(state.sub_position_unit) *
-                CLAMP(lerp(state.sub_position_unit * sgn(state.sub_position_unit), 0.1, 0.9, 0, 1), (float)0, (float)1);
-            float normalized = state.current_position + normalizedFractional;
-            float speed = sgn(normalized) * powf(2, fabsf(normalized) - 1);
-            float roundedSpeed = truncf(speed * 10) / 10;
-
-            spr_.setFreeFont(&Roboto_Thin_24);
-            if (roundedSpeed == 0) {
-              spr_.drawString("Paused", TFT_WIDTH / 2, TFT_HEIGHT / 2 + DESCRIPTION_Y_OFFSET + VALUE_OFFSET, 1);
-
-              spr_.fillRect(TFT_WIDTH / 2 + 5, TFT_HEIGHT / 2 - 20, 10, 40, TFT_WHITE);
-              spr_.fillRect(TFT_WIDTH / 2 - 5 - 10, TFT_HEIGHT / 2 - 20, 10, 40, TFT_WHITE);
-            } else {
-              char buf[10];
-              snprintf(buf, sizeof(buf), "%0.1fx", roundedSpeed);
-              spr_.drawString(buf, TFT_WIDTH / 2, TFT_HEIGHT / 2 + DESCRIPTION_Y_OFFSET + VALUE_OFFSET, 1);
-
-              uint16_t x = TFT_WIDTH / 2;
-              for (uint8_t i = 0; i < max(1, abs(state.current_position)); i++) {
-                drawPlayButton(spr_, x, TFT_HEIGHT / 2, sgn(roundedSpeed) * 20, 40, TFT_WHITE);
-                x += sgn(roundedSpeed) * 20;
-              }
-            }
-          }
-        }
-
-        spr_.pushSprite(0, 0);
+        lv_timer_handler();  // LVGL redraws whatever changed
 
         {
-          SemaphoreGuard lock(mutex_);
-          ledcWrite(LEDC_CHANNEL_LCD_BACKLIGHT, brightness_);
+            SemaphoreGuard lock(mutex_);
+            ledcWrite(LEDC_CHANNEL_LCD_BACKLIGHT, brightness_);
         }
         delay(5);
     }
 }
 
+void DisplayTask::buildScreen() {
+    lv_obj_t* screen = lv_screen_active();
+    lv_obj_set_style_bg_color(screen, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
+
+    // Range arcs: a dim track and a bright fill, drawn just inside the edge
+    track_arc_ = lv_arc_create(screen);
+    lv_obj_set_size(track_arc_, RING_RADIUS * 2, RING_RADIUS * 2);
+    lv_obj_center(track_arc_);
+    lv_obj_remove_flag(track_arc_, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_arc_width(track_arc_, 4, LV_PART_MAIN);
+    lv_obj_set_style_arc_color(track_arc_, lv_color_hex(COLOR_TRACK), LV_PART_MAIN);
+    lv_obj_set_style_arc_opa(track_arc_, LV_OPA_TRANSP, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_opa(track_arc_, LV_OPA_TRANSP, LV_PART_KNOB);
+    lv_obj_set_style_pad_all(track_arc_, 0, LV_PART_KNOB);
+
+    fill_arc_ = lv_arc_create(screen);
+    lv_obj_set_size(fill_arc_, RING_RADIUS * 2, RING_RADIUS * 2);
+    lv_obj_center(fill_arc_);
+    lv_obj_remove_flag(fill_arc_, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_arc_opa(fill_arc_, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_arc_width(fill_arc_, 4, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(fill_arc_, lv_color_hex(COLOR_ACCENT), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_opa(fill_arc_, LV_OPA_TRANSP, LV_PART_KNOB);
+    lv_obj_set_style_pad_all(fill_arc_, 0, LV_PART_KNOB);
+
+    // Position dot
+    dot_ = lv_obj_create(screen);
+    lv_obj_remove_style_all(dot_);
+    lv_obj_set_size(dot_, DOT_SIZE, DOT_SIZE);
+    lv_obj_set_style_radius(dot_, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(dot_, lv_color_hex(COLOR_ACCENT), 0);
+    lv_obj_set_style_bg_opa(dot_, LV_OPA_COVER, 0);
+
+    // Big value in the middle, mode name underneath
+    value_label_ = lv_label_create(screen);
+    lv_obj_set_style_text_font(value_label_, &lv_font_montserrat_48, 0);
+    lv_obj_set_style_text_color(value_label_, lv_color_white(), 0);
+    lv_obj_align(value_label_, LV_ALIGN_CENTER, 0, -18);
+    lv_label_set_text(value_label_, "");
+
+    text_label_ = lv_label_create(screen);
+    lv_obj_set_style_text_font(text_label_, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(text_label_, lv_color_hex(COLOR_TEXT_DIM), 0);
+    lv_obj_set_style_text_align(text_label_, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(text_label_, LV_ALIGN_CENTER, 0, 40);
+    lv_label_set_text(text_label_, "");
+}
+
+void DisplayTask::updateScreen(const PB_SmartKnobState& state) {
+    const PB_SmartKnobConfig& config = state.config;
+    float width_degrees = config.position_width_radians * 180 / PI;
+    int32_t num_positions = config.max_position - config.min_position + 1;
+    bool bounded = num_positions > 0;
+
+    // Angles in LVGL degrees: 0 = right, 90 = bottom, 270 = top, clockwise.
+    // Bounded modes spread their range evenly either side of the top.
+    float range_degrees = bounded ? fminf((config.max_position - config.min_position) * width_degrees, 340) : 0;
+    float start_angle = 270 - range_degrees / 2;
+    float dot_angle = start_angle + (state.current_position - config.min_position + state.sub_position_unit) * width_degrees;
+    if (bounded) {
+        dot_angle = CLAMP(dot_angle, start_angle - 8, start_angle + range_degrees + 8);  // a little rubber-band past the ends
+    }
+
+    // Range arcs (hidden for unbounded modes)
+    if (bounded && range_degrees > 0) {
+        lv_obj_remove_flag(track_arc_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(fill_arc_, LV_OBJ_FLAG_HIDDEN);
+        lv_arc_set_bg_angles(track_arc_, wrapDegrees(start_angle), wrapDegrees(start_angle + range_degrees));
+        float fill_end = CLAMP(dot_angle, start_angle, start_angle + range_degrees);
+        lv_arc_set_angles(fill_arc_, wrapDegrees(start_angle), wrapDegrees(fill_end));
+    } else {
+        lv_obj_add_flag(track_arc_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(fill_arc_, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    // Dot on the ring
+    float radians = dot_angle * PI / 180;
+    int32_t x = CENTER + (int32_t)(RING_RADIUS * cosf(radians)) - DOT_SIZE / 2;
+    int32_t y = CENTER + (int32_t)(RING_RADIUS * sinf(radians)) - DOT_SIZE / 2;
+    lv_obj_set_pos(dot_, x, y);
+
+    // Value (only redraw when it changes)
+    if (state.current_position != shown_value_) {
+        shown_value_ = state.current_position;
+        lv_label_set_text_fmt(value_label_, "%d", (int)state.current_position);
+    }
+
+    // Mode name; Scott's demo modes start with "SKDEMO_", which we hide
+    const char* text = config.text;
+    if (strncmp(text, "SKDEMO_", 7) == 0) {
+        text += 7;
+    }
+    if (strcmp(text, shown_text_) != 0) {
+        strncpy(shown_text_, text, sizeof(shown_text_) - 1);
+        lv_label_set_text(text_label_, text);
+    }
+}
+
 QueueHandle_t DisplayTask::getKnobStateQueue() {
-  return knob_state_queue_;
+    return knob_state_queue_;
 }
 
 void DisplayTask::setBrightness(uint16_t brightness) {
-  SemaphoreGuard lock(mutex_);
-  brightness_ = brightness >> (16 - SK_BACKLIGHT_BIT_DEPTH);
+    SemaphoreGuard lock(mutex_);
+    brightness_ = brightness >> (16 - SK_BACKLIGHT_BIT_DEPTH);
 }
 
 void DisplayTask::setLogger(Logger* logger) {
