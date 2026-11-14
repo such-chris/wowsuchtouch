@@ -12,6 +12,17 @@
 #include "motors/motor_config.h"
 #include "util.h"
 
+// Rim "follow" mode tuning (override in a motors/*.h file if needed)
+#ifndef FOLLOW_P
+#define FOLLOW_P 6.0f       // how hard the knob is pulled toward the finger's position
+#endif
+#ifndef FOLLOW_D
+#define FOLLOW_D 0.1f     // damping, stops it overshooting and wobbling
+#endif
+#ifndef FOLLOW_LIMIT
+#define FOLLOW_LIMIT 3.0f   // maximum push (volts)
+#endif
+
 static const float DEAD_ZONE_DETENT_PERCENT = 0.2;
 static const float DEAD_ZONE_RAD = 1 * _PI / 180;
 
@@ -97,6 +108,9 @@ void MotorTask::run() {
     };
     int32_t current_position = 0;
     float latest_sub_position_unit = 0;
+
+    bool following = false;
+    float follow_start_angle = 0;
 
     float idle_check_velocity_ewma = 0;
     uint32_t last_idle_start = 0;
@@ -259,6 +273,30 @@ void MotorTask::run() {
         motor.PID_velocity.P = out_of_bounds ? config.endstop_strength_unit * 4 : config.detent_strength_unit * 4;
 
 
+        // Rim "follow" mode: steer the knob toward the finger instead of holding detents.
+        // Angles here are in the same direction as the detent math above
+        // (decreasing = value going up), so the inversion is handled the same way.
+        #if SK_INVERT_ROTATION
+            float knob_angle = -motor.shaft_angle;
+            float knob_velocity = -motor.shaft_velocity;
+        #else
+            float knob_angle = motor.shaft_angle;
+            float knob_velocity = motor.shaft_velocity;
+        #endif
+        bool follow_requested = follow_active_;
+        float follow_delta = follow_delta_radians_;
+        if (follow_requested && !following) {
+            // Start following from wherever the knob is now
+            following = true;
+            follow_start_angle = knob_angle + follow_delta;
+        } else if (!follow_requested) {
+            following = false;
+        }
+        if (following && out_of_bounds) {
+            // At a limit: let the end stop hold, and re-anchor so reversing responds right away
+            follow_start_angle = knob_angle + follow_delta;
+        }
+
         // Apply motor torque based on our angle to the nearest detent (detent strength, etc is handled by the PID_velocity parameters)
         if (fabsf(motor.shaft_velocity) > 60) {
             // Don't apply torque if velocity is too high (helps avoid positive feedback loop/runaway)
@@ -278,6 +316,10 @@ void MotorTask::run() {
                 }
             }
             float torque = motor.PID_velocity(input);
+            if (following && !out_of_bounds) {
+                float target = follow_start_angle - follow_delta;
+                torque = CLAMP(FOLLOW_P * (target - knob_angle) - FOLLOW_D * knob_velocity, -FOLLOW_LIMIT, FOLLOW_LIMIT);
+            }
             #if SK_INVERT_ROTATION
                 torque = -torque;
             #endif
@@ -297,6 +339,11 @@ void MotorTask::run() {
 
         delay(1);
     }
+}
+
+void MotorTask::setFollow(bool active, float delta_radians) {
+    follow_delta_radians_ = delta_radians;
+    follow_active_ = active;
 }
 
 void MotorTask::setConfig(const PB_SmartKnobConfig& config) {

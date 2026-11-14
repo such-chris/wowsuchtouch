@@ -498,6 +498,9 @@ void InterfaceTask::applyConfig(PB_SmartKnobConfig& config, bool from_remote) {
 }
 
 #if SK_TOUCH
+// Rim travel needed before a touch counts as a slide instead of a tap
+static const float RING_SLIDE_START_DEGREES = 4;
+
 void InterfaceTask::updateTouch() {
     // Poll the touch chip every 10 ms
     static uint32_t last_poll;
@@ -510,21 +513,55 @@ void InterfaceTask::updateTouch() {
     uint16_t x = 0, y = 0;
     bool touching = touch_.read(x, y);
 
-    // Sliding around the rim works like a click wheel (test: log + light click per step)
-    int ring_steps = touch_ring_.update(touching, x, y);
-    if (ring_steps != 0) {
-        // This touch is a ring slide, so don't also report it as a swipe or tap
-        touch_gestures_.cancelCurrentTouch();
-        snprintf(buf_, sizeof(buf_), "Ring: %+d (angle %d)", ring_steps, (int)touch_ring_.angle());
-        log(buf_);
-        motor_task_.playHaptic(false);
+    // Sliding around the rim acts like turning the knob
+    float ring_delta = touch_ring_.update(touching, x, y);
+    if (touch_ring_.active()) {
+        if (!ring_was_active_) {
+            // Finger just arrived on the rim
+            ring_was_active_ = true;
+            ring_is_slide_ = false;
+            ring_stepper_.start(latest_state_.current_position);
+        }
 
-        // Move the knob's value by the same number of steps
-        PB_SmartKnobConfig config = latest_config_;
-        config.position = latest_state_.current_position + ring_steps;
-        config.sub_position_unit = 0;
-        config.position_nonce = latest_config_.position_nonce + 1;
-        applyConfig(config, remote_controlled_);
+        // Small wiggles still count as taps; past a few degrees it's a slide
+        float feed_degrees = 0;
+        if (!ring_is_slide_ && fabsf(touch_ring_.totalDegrees()) > RING_SLIDE_START_DEGREES) {
+            ring_is_slide_ = true;
+            touch_gestures_.cancelCurrentTouch();
+            feed_degrees = touch_ring_.totalDegrees();
+        } else if (ring_is_slide_) {
+            feed_degrees = ring_delta;
+        }
+
+        if (ring_is_slide_) {
+            if (ring_mode_ == RingMode::TRACK) {
+                // Change the value exactly as turning the knob the same angle would
+                RingStepResult result = ring_stepper_.step(feed_degrees * DEG_TO_RAD,
+                    latest_config_.position_width_radians, latest_config_.min_position, latest_config_.max_position);
+                if (result.moved) {
+                    PB_SmartKnobConfig config = latest_config_;
+                    config.position = result.position;
+                    config.sub_position_unit = 0;
+                    config.position_nonce = latest_config_.position_nonce + 1;
+                    applyConfig(config, remote_controlled_);
+                    if (latest_config_.detent_strength_unit > 0) {
+                        motor_task_.playHaptic(false);  // light click, only in modes with detents
+                    }
+                }
+                if (result.hit_end) {
+                    motor_task_.playHaptic(true);  // firm bump at the limit
+                }
+            } else {
+                // Motor physically turns the knob to follow the finger
+                motor_task_.setFollow(true, touch_ring_.totalDegrees() * DEG_TO_RAD);
+            }
+        }
+    } else if (ring_was_active_) {
+        // Finger left the rim
+        ring_was_active_ = false;
+        if (ring_mode_ == RingMode::FOLLOW) {
+            motor_task_.setFollow(false, 0);
+        }
     }
 
     TouchGesture gesture = touch_gestures_.update(touching, x, y, now);
@@ -555,12 +592,14 @@ void InterfaceTask::updateTouch() {
             }
             break;
         case TouchGesture::TRIPLE_TAP:
-            // Three firm clicks (action reserved for later)
+            // Three firm clicks + switch how the rim slider behaves
             motor_task_.playHaptic(true);
             delay(80);
             motor_task_.playHaptic(true);
             delay(80);
             motor_task_.playHaptic(true);
+            ring_mode_ = ring_mode_ == RingMode::TRACK ? RingMode::FOLLOW : RingMode::TRACK;
+            log(ring_mode_ == RingMode::TRACK ? "Ring mode: TRACK (value follows finger)" : "Ring mode: FOLLOW (knob turns with finger)");
             break;
         case TouchGesture::LONG_PRESS:
             // Firm click while the finger is still down (action reserved for later)

@@ -39,6 +39,11 @@ class MotorTask : public Task<MotorTask> {
 
         void setConfig(const PB_SmartKnobConfig& config);
         void playHaptic(bool press);
+
+        // Rim "follow" mode: while active, the motor turns the knob so it tracks
+        // the finger. delta_radians = finger travel since the slide started
+        // (+ = direction that raises the value).
+        void setFollow(bool active, float delta_radians);
         void runCalibration();
 
         void addListener(QueueHandle_t queue);
@@ -53,6 +58,9 @@ class MotorTask : public Task<MotorTask> {
         Logger* logger_;
         std::vector<QueueHandle_t> listeners_;
         char buf_[72];
+
+        volatile bool follow_active_ = false;
+        volatile float follow_delta_radians_ = 0;
 
         // BLDC motor & driver instance
         BLDCMotor motor = BLDCMotor(1);

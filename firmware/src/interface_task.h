@@ -16,6 +16,7 @@
 #include "cst816s_touch.h"
 #include "touch_gestures.h"
 #include "touch_ring.h"
+#include "ring_stepper.h"
 #endif
 
 #ifndef SK_FORCE_UART_STREAM
@@ -63,6 +64,13 @@ class InterfaceTask : public Task<InterfaceTask>, public Logger {
         CST816STouch touch_;
         TouchGestures touch_gestures_;
         TouchRing touch_ring_;
+        RingStepper ring_stepper_;
+
+        // How sliding around the rim behaves (triple tap switches)
+        enum class RingMode { TRACK, FOLLOW };
+        RingMode ring_mode_ = RingMode::TRACK;
+        bool ring_was_active_ = false;
+        bool ring_is_slide_ = false;  // moved far enough to count as a slide, not a tap
         void updateTouch();
         #endif
 

@@ -2,7 +2,7 @@
 
 #include <math.h>
 
-int TouchRing::update(bool touching, uint16_t x, uint16_t y) {
+float TouchRing::update(bool touching, uint16_t x, uint16_t y) {
     float dx = (float)x - center_x;
     float dy = (float)y - center_y;
     float radius = sqrtf(dx * dx + dy * dy);
@@ -22,7 +22,7 @@ int TouchRing::update(bool touching, uint16_t x, uint16_t y) {
         // Finger just arrived on the rim: start measuring from here
         active_ = true;
         last_angle_ = angle;
-        leftover_degrees_ = 0;
+        total_degrees_ = 0;
         return 0;
     }
 
@@ -34,9 +34,6 @@ int TouchRing::update(bool touching, uint16_t x, uint16_t y) {
         delta += 360;
     }
     last_angle_ = angle;
-
-    leftover_degrees_ += delta;
-    int steps = (int)(leftover_degrees_ / step_degrees);  // rounds toward zero
-    leftover_degrees_ -= steps * step_degrees;
-    return steps;
+    total_degrees_ += delta;
+    return delta;
 }
