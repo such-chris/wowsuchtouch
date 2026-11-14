@@ -95,6 +95,12 @@ class InterfaceTask : public Task<InterfaceTask>, public Logger {
         int ble_last_config_ = -1;          // mode the last sent position belongs to
         int32_t ble_last_position_ = 0;     // value when keys were last sent
         bool ble_was_connected_ = false;
+        int32_t ble_volume_level_ = 32;     // last volume shown, restored when returning to Volume
+        bool ble_volume_resynced_ = false;  // already re-synced for this push into an end stop
+        float ble_scroll_accum_ = 0;        // fractional wheel ticks not yet sent
+        uint32_t ble_scroll_last_ms_ = 0;
+        float ring_scroll_accum_degrees_ = 0;
+        bool inBleMode(int output);
         void updateBleOutput();
         #endif
 

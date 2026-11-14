@@ -152,9 +152,10 @@ void DisplayTask::updateScreen(const PB_SmartKnobState& state) {
     float range_degrees = bounded ? fminf((config.max_position - config.min_position) * width_degrees, 340) : 0;
     float start_angle = 270 - range_degrees / 2;
     float dot_angle = start_angle + (state.current_position - config.min_position + state.sub_position_unit) * width_degrees;
-    if (bounded) {
+    if (bounded && num_positions > 1) {
         dot_angle = CLAMP(dot_angle, start_angle - 8, start_angle + range_degrees + 8);  // a little rubber-band past the ends
     }
+    // (Single-position "spring" modes let the dot follow the full deflection)
 
     // Range arcs (hidden for unbounded modes)
     if (bounded && range_degrees > 0) {

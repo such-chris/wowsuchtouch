@@ -32,6 +32,15 @@ Adafruit_VEML7700 veml = Adafruit_VEML7700();
 enum class KnobOutput { VOLUME, SCROLL, ARROWS };
 static const KnobOutput ble_mode_outputs[] = { KnobOutput::VOLUME, KnobOutput::SCROLL, KnobOutput::ARROWS };
 static const bool BLE_FINE_VOLUME = true;  // Shift+Option quarter steps on macOS
+
+// Spring scroll tuning (deflection is in "full deflections", i.e. 1.0 = 60 degrees)
+static const float SCROLL_DEAD_ZONE = 0.08;      // ignore tiny wobbles around center
+static const float SCROLL_MIN_RATE = 6;          // wheel ticks per second just past the dead zone
+static const float SCROLL_EXTRA_RATE = 120;      // added at full deflection (grows with the square)
+static const float RIM_SCROLL_DEGREES = 5;       // rim travel per wheel tick in Scroll mode
+
+// Volume: pushing past an end stop by this much (in steps) re-syncs with the Mac
+static const float VOLUME_RESYNC_PUSH = 0.3;
 #endif
 
 static PB_SmartKnobConfig configs[] = {
@@ -52,12 +61,12 @@ static PB_SmartKnobConfig configs[] = {
 
 #if SK_BLE
     {
+        32, // starts mid-way; push into either end stop to line up with the Mac
         0,
         0,
         0,
-        0,
-        -1, // no limits: the Mac doesn't tell us its volume
-        8 * PI / 180,
+        64, // the Mac's 64 quarter steps of volume
+        5 * PI / 180,
         0.8,
         1,
         1.1,
@@ -68,14 +77,16 @@ static PB_SmartKnobConfig configs[] = {
         0,
     },
     {
+        // Spring-return: a single position, so any turn pushes against the end-stop
+        // force, which grows the further you turn. How far = how fast it scrolls.
         0,
         0,
         0,
         0,
-        -1,
-        3 * PI / 180,
-        0.3,
-        1,
+        0,
+        60 * PI / 180,  // 60 degrees of turn = "full" deflection
+        0,
+        1,              // spring strength
         1.1,
         "Scroll",
         0,
@@ -462,6 +473,13 @@ void InterfaceTask::changeConfig(bool next) {
         }
     }
     
+    #if SK_BLE
+        // Volume picks up where it was last left
+        if (current_config_ < (int)COUNT_OF(ble_mode_outputs) && ble_mode_outputs[current_config_] == KnobOutput::VOLUME) {
+            configs[current_config_].position = ble_volume_level_;
+        }
+    #endif
+
     snprintf(buf_, sizeof(buf_), "Changing config to %d -- %s", current_config_, configs[current_config_].text);
     log(buf_);
     applyConfig(configs[current_config_], false);
@@ -613,6 +631,17 @@ void InterfaceTask::updateTouch() {
         }
 
         if (ring_is_slide_) {
+            #if SK_BLE
+            if (inBleMode((int)KnobOutput::SCROLL)) {
+                // Scroll mode has no value to step: the rim scrolls directly
+                ring_scroll_accum_degrees_ += feed_degrees;
+                int32_t ticks = (int32_t)(ring_scroll_accum_degrees_ / RIM_SCROLL_DEGREES);
+                if (ticks != 0) {
+                    ble_.scrollSteps(ticks);
+                    ring_scroll_accum_degrees_ -= ticks * RIM_SCROLL_DEGREES;
+                }
+            } else
+            #endif
             if (ring_mode_ == RingMode::TRACK) {
                 // Change the value exactly as turning the knob the same angle would
                 RingStepResult result = ring_stepper_.step(feed_degrees * DEG_TO_RAD,
@@ -704,6 +733,12 @@ void InterfaceTask::updateTouch() {
 #endif
 
 #if SK_BLE
+bool InterfaceTask::inBleMode(int output) {
+    return !remote_controlled_
+        && current_config_ < (int)COUNT_OF(ble_mode_outputs)
+        && (int)ble_mode_outputs[current_config_] == output;
+}
+
 void InterfaceTask::updateBleOutput() {
     bool connected = ble_.isConnected();
     if (connected != ble_was_connected_) {
@@ -721,29 +756,58 @@ void InterfaceTask::updateBleOutput() {
     if (current_config_ != ble_last_config_) {
         ble_last_config_ = current_config_;
         ble_last_position_ = position;
+        ble_scroll_accum_ = 0;
+        ble_scroll_last_ms_ = millis();
+        ble_volume_resynced_ = false;
         return;
     }
 
     int32_t steps = position - ble_last_position_;
-    if (steps == 0) {
-        return;
-    }
     ble_last_position_ = position;
 
-    // Only the Bluetooth modes (first in the list) send anything
-    if (remote_controlled_ || current_config_ >= (int)COUNT_OF(ble_mode_outputs)) {
-        return;
-    }
-    switch (ble_mode_outputs[current_config_]) {
-        case KnobOutput::VOLUME:
+    if (inBleMode((int)KnobOutput::VOLUME)) {
+        if (steps != 0) {
             ble_.volumeSteps(steps, BLE_FINE_VOLUME);
-            break;
-        case KnobOutput::SCROLL:
-            ble_.scrollSteps(steps);
-            break;
-        case KnobOutput::ARROWS:
+        }
+        ble_volume_level_ = position;
+
+        // Pushing into an end stop sends a full sweep in that direction. The Mac
+        // stops at 0% / 100% too, so afterwards the knob and Mac agree again.
+        float push = latest_state_.sub_position_unit;
+        bool push_low = position == latest_config_.min_position && push < -VOLUME_RESYNC_PUSH;
+        bool push_high = position == latest_config_.max_position && push > VOLUME_RESYNC_PUSH;
+        if ((push_low || push_high) && !ble_volume_resynced_) {
+            ble_volume_resynced_ = true;
+            log(push_high ? "Volume: lining up with the Mac at 100%" : "Volume: lining up with the Mac at 0%");
+            ble_.volumeSteps(push_high ? 16 : -16, false);  // 16 normal steps = the whole range
+        } else if (fabsf(push) < 0.1f) {
+            ble_volume_resynced_ = false;
+        }
+    } else if (inBleMode((int)KnobOutput::SCROLL)) {
+        // Spring scroll: speed comes from how far the knob is held off center
+        uint32_t now = millis();
+        float dt = (now - ble_scroll_last_ms_) / 1000.0f;
+        ble_scroll_last_ms_ = now;
+        if (dt > 0.1f) {
+            dt = 0.1f;
+        }
+        float deflection = latest_state_.sub_position_unit;
+        float beyond = fabsf(deflection) - SCROLL_DEAD_ZONE;
+        if (beyond <= 0) {
+            ble_scroll_accum_ = 0;
+            return;
+        }
+        float rate = SCROLL_MIN_RATE + SCROLL_EXTRA_RATE * beyond * beyond;
+        ble_scroll_accum_ += (deflection > 0 ? 1 : -1) * rate * dt;
+        int32_t ticks = (int32_t)ble_scroll_accum_;
+        if (ticks != 0) {
+            ble_.scrollSteps(ticks);
+            ble_scroll_accum_ -= ticks;
+        }
+    } else if (inBleMode((int)KnobOutput::ARROWS)) {
+        if (steps != 0) {
             ble_.arrowSteps(steps);
-            break;
+        }
     }
 }
 #endif

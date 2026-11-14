@@ -125,8 +125,8 @@ The first three modes send keys whenever the value changes (knob, rim TRACK or F
 
 | Mode | Sends | Feel |
 |---|---|---|
-| Volume | volume up/down in quarter steps (Shift+Option) | 8 degree clicks, no end stops |
-| Scroll | mouse wheel, clockwise = down | 3 degree light clicks |
+| Volume | volume up/down in quarter steps (Shift+Option) | 0-64 with hard stops, 5 degree clicks; push into an end stop to line up with the Mac |
+| Scroll | mouse wheel, clockwise = down | spring-return: turn further = scroll faster + more resistance; rim scrolls directly |
 | Arrows | right / left arrow keys | 15 degree firm clicks |
 
 Code: `firmware/src/ble_output.*` (keys), `updateBleOutput()` in `interface_task.cpp` (which mode sends what).
