@@ -28,7 +28,7 @@ class DisplayTask : public Task<DisplayTask> {
         void showScreen(const UiScreen& screen);
         void showStatus(const UiStatus& status);
         void showToast(const UiToast& toast);
-        void showValueText(const char* text);
+        void showValueText(const char* text, bool sub = false);
         void setLogger(Logger* logger);
 
     protected:
@@ -54,9 +54,17 @@ class DisplayTask : public Task<DisplayTask> {
         lv_obj_t* fill_arc_ = nullptr;    // bright arc from the start of the range to the value
         lv_obj_t* dot_ = nullptr;         // marker at the current position
         lv_obj_t* value_label_ = nullptr;  // big number (control and value layouts)
-        lv_obj_t* hint_labels_[4] = {};
-        lv_obj_t* end_marks_[2] = {};    // spring style: the two ends of the throw  // left, right, up, down
+        lv_obj_t* hint_labels_[4] = {};    // left, right, up, down
+        lv_obj_t* hint_images_[4] = {};    // same places, for emoji hints
+        lv_obj_t* end_marks_[2] = {};      // spring style: the two ends of the throw
+        lv_obj_t* picker_images_[UI_MAX_ITEMS] = {};   // ring pickers (Color, Rating)
+        lv_obj_t* button_labels_[UI_MAX_ITEMS] = {};   // buttons around the edge
+        lv_obj_t* button_lines_[UI_MAX_ITEMS] = {};    // dividers between them
+        lv_point_precise_t button_line_points_[UI_MAX_ITEMS][2] = {};
+        int32_t ring_radius_ = 0;                      // where the arcs and dot are drawn now
+        void setRingRadius(int32_t radius);
         lv_obj_t* text_label_ = nullptr;   // mode name (control layout)
+        lv_obj_t* sub_label_ = nullptr;    // small line under it (e.g. play / pause)
         lv_obj_t* title_label_ = nullptr;  // small heading (list and value layouts)
         lv_obj_t* list_box_ = nullptr;     // list: column of items that slides with the knob
         lv_obj_t* list_items_[UI_MAX_ITEMS] = {};

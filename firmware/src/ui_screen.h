@@ -19,6 +19,30 @@ enum class UiControlStyle : uint8_t {
     DIRECTION,  // a big arrow flashes the way you turned
 };
 
+// Little pictures (emoji) that lists and hints can show
+enum class UiIcon : uint8_t { NONE, RED, YELLOW, GREEN, BLUE, PURPLE, STAR, PALETTE };
+
+// How a LIST draws its items
+enum class UiListStyle : uint8_t {
+    DRUM,        // the turning drum (menus)
+    RING,        // icons around the top edge; the chosen one is bright
+    RING_COUNT,  // same, but everything up to the chosen one is lit (star rating)
+};
+
+// Where things sit on the ring (LVGL degrees: 0 = right, 90 = bottom, 270 = top)
+static inline float uiPickerAngle(int i, int count) {    // spread across the top
+    return 270 + (i - (count - 1) / 2.0f) * 32;
+}
+static inline float uiButtonAngle(int i, int count) {    // evenly round, first at the top
+    return 270 + i * 360.0f / count;
+}
+static const int UI_PICKER_RADIUS = 86;
+static const int UI_PICKER_RADIUS_INNER = 58;   // when buttons take the edge
+static const int UI_BUTTON_RADIUS = 90;    // the words follow the edge here, inside the ring
+static const int UI_BUTTON_LINE_FROM = 66; // dividing lines between buttons run from here...
+static const int UI_BUTTON_LINE_TO = 102;  // ...to just inside the ring
+static const int UI_SMALL_RING_RADIUS = 60; // the value ring when buttons take the edge
+
 static const uint8_t UI_MAX_ITEMS = 8;
 static const uint8_t UI_TEXT_LEN = 24;
 
@@ -35,6 +59,8 @@ struct UiScreen {
     // Show the Bluetooth / battery status line at the top
     bool show_status = false;
     char items[UI_MAX_ITEMS][UI_TEXT_LEN] = {};
+    UiListStyle list_style = UiListStyle::DRUM;
+    UiIcon item_icons[UI_MAX_ITEMS] = {};
 
     // VALUE: shows (knob position x multiplier) + suffix, or line1/line2 if show_number is false
     bool show_number = false;
@@ -48,10 +74,17 @@ struct UiScreen {
     UiControlStyle control_style = UiControlStyle::NORMAL;
     bool hide_value = false;
     bool hide_ring = false;
-    char hint_left[12] = {};
-    char hint_right[12] = {};
-    char hint_up[12] = {};
-    char hint_down[12] = {};
+    char hint_left[16] = {};
+    char hint_right[16] = {};
+    char hint_up[16] = {};
+    char hint_down[16] = {};
+    // A hint is a word, or ":x:" (grey cross), ":check:" (white tick), ":palette:", ":star:",
+    // optionally followed by a word: ":x: Reject"
+
+    // CONTROL: buttons around the edge (e.g. Lightroom sliders); tap one to choose it
+    uint8_t button_count = 0;
+    uint8_t button_selected = 0;
+    char buttons[UI_MAX_ITEMS][12] = {};
 };
 
 // Status line at the top of every screen
@@ -65,6 +98,7 @@ struct UiStatus {
 // Cleared whenever a new screen is shown.
 struct UiValueText {
     char text[16] = {};
+    bool sub = false;   // true: a small line under the page name instead of the big value
 };
 
 // A short message that pops up and fades away

@@ -23,18 +23,23 @@ enum class TurnOutput { NONE, VOLUME, SCROLL, ARROWS, KEYS, LINK };
 struct KeyCombo {
     uint8_t modifiers = 0;   // HID modifier bits: ctrl 0x01, shift 0x02, option 0x04, cmd 0x08
     uint8_t key = 0;         // HID key code
-    bool isSet() const { return key != 0; }
+    uint32_t media = 0;      // or a media key (play, next, prev, mute) instead
+    bool isSet() const { return key != 0 || media != 0; }
 };
 
 // "p", "=", "shift+]", "cmd+z", "right"... Returns false if it doesn't recognise it.
 bool parseKeyCombo(const char* text, KeyCombo& out);
 
 // What a gesture does: a key, or moving around the profile
-enum class ActionKind { NONE, KEY, NEXT_PAGE, NEXT_MODULE, PREV_MODULE, NEXT_MODE, PREV_MODE, LINK };
+// PAGE: open a page of this module by label ("page:Rating"; "page:A|B" picks by current view)
+// VIEW: switch to the other "view" page (a page with an enter key, e.g. Grid <-> Loupe)
+// NOTHING: "none" in the profile, switches a gesture's default off
+enum class ActionKind { NONE, NOTHING, KEY, NEXT_PAGE, NEXT_MODULE, PREV_MODULE, NEXT_MODE, PREV_MODE, LINK, MODULE, PAGE, VIEW };
 struct Action {
     ActionKind kind = ActionKind::NONE;   // NONE = use the gesture's default
     KeyCombo key;
-    String name;    // LINK: action sent to the Mac, e.g. "reset"
+    String name;    // the action as written in the profile ("p", "link:reset", "next_page"...)
+    // LINK: name after "link:"; MODULE: the module to open ("module:Color")
     bool isSet() const { return kind != ActionKind::NONE; }
 };
 
@@ -42,6 +47,7 @@ struct Action {
 struct PickOption {
     String label;
     Action action;   // a key, or e.g. "link:label:Purple" for the Mac to carry out
+    uint8_t icon = 0;  // UiIcon: emoji shown by ring pickers
 };
 
 struct ProfilePage {
@@ -60,8 +66,13 @@ struct ProfilePage {
     // A picker page: the screen lists these, turn to choose, tap sends the choice
     // and returns to the first module
     std::vector<PickOption> pick;
+    uint8_t pick_style = 0;         // UiListStyle: 0 drum list, 1 "ring", 2 "count" (stars)
+    String pick_value;              // "rating" / "label": start on the photo's current value
+    std::vector<PickOption> buttons;  // action buttons round the edge (tap one to run it)
+    String short_name;              // set on every page of a module = buttons around the edge
     // Screen: hide the number / the ring, and what each swipe does (shown at the edges)
     bool show_value = true;
+    bool show_label = true;         // false: nothing in the middle (e.g. Lightroom Grid)
     uint8_t display = 0;            // UiControlStyle: 0 normal, 1 "spring", 2 "direction"
     bool show_ring = true;
     String hint_left, hint_right, hint_up, hint_down;
@@ -70,6 +81,7 @@ struct ProfilePage {
 struct ProfileModule {
     String name;
     std::vector<ProfilePage> pages;
+    std::vector<PickOption> buttons;  // edge buttons shared by every page of the module
 };
 
 struct ProfileMode {
@@ -85,6 +97,8 @@ struct Profile {
     String name;
     bool in_menu = true;   // false: only opened automatically (by the Mac app), not from the menu
     bool title_in_center = false;  // profile name in the middle of the screen
+    bool mode_toasts = true;       // pop-up naming the mode when it changes
+    Action triple_tap;             // for every page that doesn't set its own (e.g. undo)
     std::vector<ProfileMode> modes;
 };
 

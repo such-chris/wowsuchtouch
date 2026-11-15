@@ -168,6 +168,8 @@ final class Link {
     var knobProfiles: [String] = []   // from the knob's hello
     var knobProfile: String?          // what the knob has open now
     var frontApp: NSRunningApplication?
+    var pluginState: [String: String] = [:]   // last "module" / "tool" line from the plugin, replayed to the knob
+    var mediaState = ""                        // "playing" / "paused" / "" from Music or Spotify
 
     init() {
         port.onConnect = { [weak self] in
@@ -177,11 +179,14 @@ final class Link {
         port.onLine = { [weak self] line in self?.handle(line) }
         // Everything the plugin says goes straight to the knob (values, the open tool)
         fromPlugin.onLine = { [weak self] line in
-            if line.contains("\"tool\"") {
-                print("Lightroom: \(line)")  // shows tool names, to match profile "tools"
+            if line.contains("\"tool\"") || line.contains("\"module\"") || line.contains("\"meta\"") {
+                let key = line.contains("\"tool\"") ? "tool" : (line.contains("\"meta\"") ? "meta" : "module")
+                if key != "meta" { print("Lightroom: \(line)") }  // tool / module names, to match the profile
+                self?.pluginState[key] = line
             }
             self?.port.sendLine(line)
         }
+        fromPlugin.onClose = { [weak self] in self?.pluginState = [:] }
 
         NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
@@ -202,8 +207,42 @@ final class Link {
             }
             self.toPlugin.tryConnect()
             self.fromPlugin.tryConnect()
+            self.pollMedia()
         }
         port.tryOpen()
+    }
+
+    // Is Music or Spotify playing? (Asked through AppleScript, only if the app is running,
+    // so neither gets launched.) Browser audio can't be seen this way.
+    func pollMedia() {
+        let script = """
+        set result to ""
+        tell application "System Events" to set names to name of every process
+        if names contains "Music" then
+            tell application "Music" to set result to (player state as string)
+        else if names contains "Spotify" then
+            tell application "Spotify" to set result to (player state as string)
+        end if
+        return result
+        """
+        DispatchQueue.global().async { [weak self] in
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            task.arguments = ["-e", script]
+            let pipe = Pipe()
+            task.standardOutput = pipe
+            task.standardError = Pipe()
+            guard (try? task.run()) != nil else { return }
+            task.waitUntilExit()
+            let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let state = out == "playing" ? "playing" : (out == "paused" ? "paused" : "")
+            DispatchQueue.main.async {
+                guard let self = self, state != self.mediaState else { return }
+                self.mediaState = state
+                self.port.send(["t": "media", "state": state])
+            }
+        }
     }
 
     func knobHas(_ name: String) -> String? {
@@ -233,7 +272,11 @@ final class Link {
     }
 
     func handle(_ line: String) {
-        // LOG: and STATE: lines are for people; messages are JSON
+        // LOG: lines are the knob talking to people (shown); STATE: lines are skipped; messages are JSON
+        if line.hasPrefix("LOG: ") {
+            print("Knob log: \(line.dropFirst(5))")
+            return
+        }
         guard line.hasPrefix("{"),
               let data = line.data(using: .utf8),
               let message = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
@@ -247,6 +290,10 @@ final class Link {
             knobProfile = message["p"] as? String
             print("Knob: firmware \(message["fw"] ?? "?"), profiles \(knobProfiles)")
             update(log: false)
+            // The knob may have missed what Lightroom last reported (it reboots when its
+            // port opens): tell it again
+            for line in pluginState.values { port.sendLine(line) }
+            port.send(["t": "media", "state": mediaState])
         case "where":
             knobProfile = message["p"] as? String  // also catches changes made on the knob itself
             print("Knob: \(message["p"] ?? "") / \(message["mode"] ?? "") / \(message["page"] ?? "")")

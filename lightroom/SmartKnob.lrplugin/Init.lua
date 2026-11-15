@@ -95,6 +95,7 @@ LrTasks.startAsyncTask(function()
         local current_param = nil   -- the slider the knob is on (from its last message)
         local last_tool = nil
         local last_module = nil
+        local last_meta = nil
 
         local function send(message)
             if sender and sender_connected then
@@ -107,7 +108,8 @@ LrTasks.startAsyncTask(function()
             if not param or not inDevelop() then return end
             local value = LrDevelopController.getValue(param)
             if type(value) == 'number' then
-                send({ t = 'val', param = param, v = value, txt = valueText(param, value) })
+                local low, high = LrDevelopController.getRange(param)
+                send({ t = 'val', param = param, v = value, txt = valueText(param, value), lo = low or 0, hi = high or 0 })
             end
         end
 
@@ -162,6 +164,7 @@ LrTasks.startAsyncTask(function()
                 sender_connected = true
                 last_tool = nil   -- tell the new connection the current tool and module
                 last_module = nil
+                last_meta = nil
             end,
             onClosed = function(socket)
                 sender_connected = false
@@ -225,6 +228,17 @@ LrTasks.startAsyncTask(function()
                 log:trace('tool: ' .. tool)
                 send({ t = 'tool', tool = tool })
                 last_tool = tool
+            end
+            -- The selected photo's rating and color label (for the Rating / Color pickers)
+            local ok, photo = pcall(function() return LrApplication.activeCatalog():getTargetPhoto() end)
+            if ok and photo and sender_connected then
+                local rating = photo:getRawMetadata('rating') or 0
+                local label = photo:getRawMetadata('colorNameForLabel') or ''
+                local meta = rating .. '/' .. label
+                if meta ~= last_meta then
+                    send({ t = 'meta', rating = rating, label = label })
+                    last_meta = meta
+                end
             end
             LrTasks.sleep(TOOL_CHECK_SECONDS)
         end

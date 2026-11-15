@@ -51,6 +51,7 @@ static const float SCROLL_MIN_RATE = 6;          // wheel ticks per second just 
 static const float SCROLL_EXTRA_RATE = 120;      // added at full deflection (grows with the square)
 static const float RIM_SCROLL_DEGREES = 5;       // rim travel per wheel tick in Scroll mode
 static const float RIM_KEY_DEGREES = 20;         // rim travel per key press on pages with rim keys
+static const float BUTTON_TAP_MIN_RADIUS = 62;   // taps further out than this pick an edge button (pixels)
 
 // Volume: pushing past an end stop by this much (in steps) re-syncs with the Mac
 static const float VOLUME_RESYNC_PUSH = 0.3;
@@ -62,16 +63,16 @@ static const float VOLUME_RESYNC_PUSH = 0.3;
 enum SettingItem {
     SET_BRIGHTNESS,
     SET_HAPTICS,
-    SET_TOUCH,
     SET_AUTO_OFF,
     SET_BLUETOOTH,
     SET_CALIBRATE,
     SET_BATTERY,
     SET_VERSION,
+    SET_DEMO,
     SET_COUNT,
 };
 static const char* setting_names[SET_COUNT] = {
-    "Brightness", "Click strength", "Touch", "Auto off", "Bluetooth", "Calibrate", "Battery", "Version",
+    "Brightness", "Click strength", "Auto off", "Bluetooth", "Calibrate", "Battery", "Version", "Demo",
 };
 static const char* auto_off_names[] = {"5 min", "15 min", "30 min", "Never"};
 static const uint32_t auto_off_minutes[] = {5, 15, 30, 0};
@@ -81,7 +82,6 @@ static const uint32_t SLEEP_DIM_MS = 30000;
 static const uint32_t SLEEP_SCREEN_OFF_MS = 120000;
 static const uint8_t SLEEP_DIM_PCT = 25;          // dimmed brightness, as a % of the normal setting
 static const float WAKE_TURN_DEGREES = 1.5f;      // turning this far counts as activity
-static const char* touch_mode_names[] = {"Track", "Follow", "Off"};
 
 // A screen inside Bluetooth (not in the Settings list itself)
 static const int SET_BT_DEVICES = SET_COUNT;
@@ -90,8 +90,11 @@ static const int SET_BT_DEVICES = SET_COUNT;
 static const uint32_t PAIRING_WINDOW_MS = 120000;
 
 // Main menu: the apps, then these
-enum MenuExtra { MENU_SETTINGS = 0, MENU_SLEEP, MENU_POWER_OFF, MENU_EXTRA_COUNT };
-static const char* const menu_extra_names[MENU_EXTRA_COUNT] = { "Settings", "Sleep", "Power off" };
+enum MenuExtra { MENU_CONTROLS = 0, MENU_SETTINGS, MENU_SLEEP, MENU_POWER_OFF, MENU_EXTRA_COUNT };
+static const char* const menu_extra_names[MENU_EXTRA_COUNT] = { "Controls", "Settings", "Sleep", "Power off" };
+
+// A screen inside the menu: what the gestures do on the current page
+static const int SET_CONTROLS = 1000;
 
 // ---- Knob feel for menus ----
 // A list: one click per item. Looping lists have no end stops (past the last item
@@ -412,18 +415,65 @@ void InterfaceTask::changeConfig(bool next) {
     current_module_ = 0;
     current_page_ = 0;
     module_pages_.clear();
+    view_page_ = 0;
     applyAppPage();
-    toast(profiles_[current_app_].modes[current_mode_].name.c_str());
+    if (profiles_[current_app_].mode_toasts) {
+        toast(profiles_[current_app_].modes[current_mode_].name.c_str());
+    }
     // e.g. Lightroom: Library opens the grid, Develop opens Develop
     sendKey(currentPage().enter);
 }
 
 void InterfaceTask::sendKey(const KeyCombo& combo, int32_t times) {
     #if SK_BLE
-        if (combo.isSet()) {
+        if (combo.media != 0) {
+            ble_.sendMediaKey(combo.media);
+        } else if (combo.isSet()) {
             ble_.sendKey(combo.modifiers, combo.key, times);
         }
     #endif
+}
+
+// Edge buttons for the current page: the page's own, else its module's
+const std::vector<PickOption>& InterfaceTask::edgeButtons() {
+    const ProfilePage& page = currentPage();
+    if (!page.buttons.empty()) return page.buttons;
+    return profiles_[current_app_].modes[current_mode_].modules[current_module_].buttons;
+}
+
+void InterfaceTask::openPage(int page) {
+    const ProfileModule& module = profiles_[current_app_].modes[current_mode_].modules[current_module_];
+    current_page_ = CLAMP(page, 0, (int)module.pages.size() - 1);
+    if (module.pages[current_page_].enter.isSet()) {
+        view_page_ = current_page_;   // Grid / Loupe: remember which view we're in
+    }
+    applyAppPage();
+    sendKey(module.pages[current_page_].enter);
+}
+
+// "View" pages are the ones with an enter key (Grid, Loupe). other = the one we're not in.
+int InterfaceTask::viewPage(bool other) {
+    const ProfileModule& module = profiles_[current_app_].modes[current_mode_].modules[current_module_];
+    int count = module.pages.size();
+    if (view_page_ >= count || !module.pages[view_page_].enter.isSet()) {
+        view_page_ = 0;
+    }
+    if (!other) return view_page_;
+    for (int i = 1; i < count; i++) {
+        int p = (view_page_ + i) % count;
+        if (module.pages[p].enter.isSet()) return p;
+    }
+    return view_page_;
+}
+
+void InterfaceTask::openModuleNamed(const char* name) {
+    const ProfileMode& mode = profiles_[current_app_].modes[current_mode_];
+    for (size_t i = 0; i < mode.modules.size(); i++) {
+        if (mode.modules[i].name.equalsIgnoreCase(name)) {
+            openModule(i);
+            return;
+        }
+    }
 }
 
 // Do a gesture's action (or its default when the page doesn't set one)
@@ -431,6 +481,9 @@ bool InterfaceTask::runAction(const Action& action, ActionKind fallback, bool st
     ActionKind kind = action.isSet() ? action.kind : fallback;
     if (kind == ActionKind::NONE) {
         return false;
+    }
+    if (kind == ActionKind::NOTHING) {
+        return true;
     }
     motor_task_.playHaptic(strong);
     switch (kind) {
@@ -440,6 +493,26 @@ bool InterfaceTask::runAction(const Action& action, ActionKind fallback, bool st
         case ActionKind::PREV_MODULE: changeModule(false); break;
         case ActionKind::NEXT_MODE:   changeConfig(true); break;
         case ActionKind::PREV_MODE:   changeConfig(false); break;
+        case ActionKind::MODULE:      openModuleNamed(action.name.c_str()); break;
+        case ActionKind::VIEW:        openPage(viewPage(true)); break;
+        case ActionKind::PAGE: {
+            // "A|B": pick by which view we're in (first view page = A)
+            String name = action.name;
+            int bar = name.indexOf('|');
+            if (bar >= 0) {
+                const ProfileModule& module = profiles_[current_app_].modes[current_mode_].modules[current_module_];
+                int view_index = 0;
+                for (int i = 0; i < viewPage(false); i++) {
+                    if (module.pages[i].enter.isSet()) view_index++;
+                }
+                name = view_index == 0 ? name.substring(0, bar) : name.substring(bar + 1);
+            }
+            const ProfileModule& module = profiles_[current_app_].modes[current_mode_].modules[current_module_];
+            for (size_t i = 0; i < module.pages.size(); i++) {
+                if (module.pages[i].label.equalsIgnoreCase(name)) openPage(i);
+            }
+            break;
+        }
         case ActionKind::LINK: {
             JsonDocument doc;
             doc["t"] = "act";
@@ -471,8 +544,11 @@ void InterfaceTask::openMode(int mode, int module) {
     current_module_ = CLAMP(module, 0, (int)profile.modes[current_mode_].modules.size() - 1);
     current_page_ = 0;
     module_pages_.clear();
+    view_page_ = 0;
     applyAppPage();
-    toast(profile.modes[current_mode_].name.c_str());
+    if (profile.mode_toasts) {
+        toast(profile.modes[current_mode_].name.c_str());
+    }
 }
 
 // The Mac says which module the program is in (Lightroom: "library", "develop"):
@@ -523,17 +599,149 @@ void InterfaceTask::handleTool(const char* tool) {
     }
 }
 
+// A tap near the edge of a page with buttons picks the nearest button's page.
+// Returns false for taps in the middle (those do the page's own tap).
+bool InterfaceTask::tapButton(uint16_t x, uint16_t y) {
+    const ProfileModule& module = profiles_[current_app_].modes[current_mode_].modules[current_module_];
+    const std::vector<PickOption>& actions = edgeButtons();
+    const ProfilePage& page = currentPage();
+    bool action_buttons = !actions.empty();
+    int count = action_buttons ? actions.size() : module.pages.size();
+    if (!action_buttons && (count < 2 || count > UI_MAX_ITEMS || module.pages[0].short_name.length() == 0)) {
+        return false;
+    }
+    float dx = (float)x - TFT_WIDTH / 2;
+    float dy = (float)y - TFT_HEIGHT / 2;
+    if (sqrtf(dx * dx + dy * dy) < BUTTON_TAP_MIN_RADIUS) {
+        return false;
+    }
+    float angle = atan2f(dy, dx) * 180 / PI;   // same degrees as the screen (0 = right, 90 = down)
+    int nearest = 0;
+    float best = 1000;
+    for (int i = 0; i < count; i++) {
+        float d = angle - uiButtonAngle(i, count);
+        d -= 360 * floorf((d + 180) / 360);   // into -180..180
+        float diff = fabsf(d);
+        if (diff < best) {
+            best = diff;
+            nearest = i;
+        }
+    }
+    if (action_buttons) {
+        const PickOption& button = actions[nearest];
+        if (!page.pick.empty()) {
+            bool same = button.action.kind == ActionKind::PAGE && button.action.name.indexOf(page.label) >= 0;
+            if (same) {
+                applyPick(true);   // the button for this picker: accept and return
+                return true;
+            }
+            applyPick(false);      // another button: accept, then do that one
+        }
+        snprintf(buf_, sizeof(buf_), "Button: %s", button.label.c_str());
+        log(buf_);
+        runAction(button.action, ActionKind::NONE, true);
+        return true;
+    }
+    motor_task_.playHaptic(true);
+    if (nearest != current_page_) {
+        current_page_ = nearest;
+        applyAppPage();
+    }
+    return true;
+}
+
+// Lightroom reported a slider's value and range: put the knob there, so the ring
+// shows where the slider sits and the end stops match its limits
+void InterfaceTask::syncLinkValue(float value, float low, float high) {
+    const PB_SmartKnobConfig& feel = currentPage().feel;
+    if (high <= low || feel.max_position < feel.min_position) {
+        return;
+    }
+    int32_t mapped = feel.min_position + (int32_t)lroundf((value - low) / (high - low) * (feel.max_position - feel.min_position));
+    mapped = CLAMP(mapped, feel.min_position, feel.max_position);
+    if (abs(mapped - latest_state_.current_position) < 2) {
+        return;   // already there (one step of rounding is fine)
+    }
+    PB_SmartKnobConfig config = latest_config_;
+    config.position = mapped;
+    config.sub_position_unit = 0;
+    config.position_nonce = ++nav_nonce_;
+    #if SK_BLE
+        ble_last_position_ = mapped;   // the jump isn't a turn
+    #endif
+    applyConfig(config, false);
+}
+
+// Menu > Controls: what each gesture does on the page you were on
+static String describeAction(const Action& action, const char* fallback) {
+    if (!action.isSet()) return fallback;
+    switch (action.kind) {
+        case ActionKind::NEXT_PAGE:   return "next page";
+        case ActionKind::NEXT_MODULE: return "next module";
+        case ActionKind::PREV_MODULE: return "prev module";
+        case ActionKind::NEXT_MODE:   return "next mode";
+        case ActionKind::PREV_MODE:   return "prev mode";
+        case ActionKind::LINK:        return action.name.substring(5);   // after "link:"
+        default:                      return "key " + action.name;
+    }
+}
+
+void InterfaceTask::openControls(int menu_index) {
+    controls_menu_index_ = menu_index;
+    setNavScreen(NavScreen::SETTING);
+    open_setting_ = SET_CONTROLS;
+    const ProfilePage& page = currentPage();
+    bool picker = !page.pick.empty();
+
+    UiScreen ui;
+    ui.layout = UiLayout::LIST;
+    copyText(ui.title, page.label.c_str());
+    ui.ring_at_bottom = true;
+    struct Row { const char* gesture; String what; } rows[] = {
+        {"Tap", picker ? String("choose") : describeAction(page.tap, "-")},
+        {"2x tap", describeAction(page.double_tap, "next mode")},
+        {"3x tap", describeAction(page.triple_tap, "-")},
+        {"Hold", describeAction(page.long_press, "next page")},
+        {"Swipe L", picker ? String("back") : describeAction(page.swipe_left, "-")},
+        {"Swipe R", describeAction(page.swipe_right, "-")},
+        {"Swipe up", describeAction(page.swipe_up, "next module")},
+        {"Swipe dn", describeAction(page.swipe_down, "prev module")},
+    };
+    ui.item_count = 8;
+    for (int i = 0; i < 8; i++) {
+        snprintf(ui.items[i], UI_TEXT_LEN, "%s: %s", rows[i].gesture, rows[i].what.c_str());
+    }
+    showUi(ui);
+    PB_SmartKnobConfig config = makeListConfig("Controls", 8, 0, ++nav_nonce_);
+    applyConfig(config, false);
+}
+
 // Picker page: send the chosen option's key, then go back to the first module
-void InterfaceTask::applyPick() {
+// Under "Volume": a pause symbol while music plays, play while it's paused, nothing otherwise
+void InterfaceTask::showMediaState() {
+    #if SK_DISPLAY
+        if (nav_screen_ != NavScreen::APP || currentPage().turn != TurnOutput::VOLUME) {
+            return;
+        }
+        const char* symbol = media_state_ == "playing" ? LV_SYMBOL_PAUSE
+                           : media_state_ == "paused" ? LV_SYMBOL_PLAY : "";
+        display_task_->showValueText(symbol, true);
+    #endif
+}
+
+void InterfaceTask::applyPick(bool go_back) {
     const ProfilePage& page = currentPage();
     if (page.pick.empty()) {
         return;
     }
     int32_t index = CLAMP(selectedIndex(), (int32_t)0, (int32_t)page.pick.size() - 1);
     const PickOption& option = page.pick[index];
+    if (page.pick_value == "rating") link_rating_ = index;
+    if (page.pick_value == "label") link_label_ = option.label;
     runAction(option.action, ActionKind::NONE, true);
-    toast(option.label.c_str());
-    openModule(0);
+    if (go_back) {
+        openPage(viewPage(false));
+    }
 }
 
 void InterfaceTask::changeModule(bool next) {
@@ -543,6 +751,9 @@ void InterfaceTask::changeModule(bool next) {
         return;
     }
     openModule(wrapIndex(current_module_ + (next ? 1 : -1), mode.modules.size()));
+    if (currentPage().pick.empty()) {
+        toast(mode.modules[current_module_].name.c_str());   // e.g. "Presence" (a slider group counts as a mode)
+    }
 }
 
 void InterfaceTask::openModule(int module) {
@@ -561,9 +772,7 @@ void InterfaceTask::nextPage() {
     if (nav_screen_ != NavScreen::APP || module.pages.size() < 2) {
         return;
     }
-    current_page_ = wrapIndex(current_page_ + 1, module.pages.size());
-    applyAppPage();
-    sendKey(currentPage().enter);
+    openPage(wrapIndex(current_page_ + 1, module.pages.size()));
 }
 
 int InterfaceTask::menuIndexOf(int app) {
@@ -609,6 +818,7 @@ void InterfaceTask::handleLinkMessage(const char* line) {
             sendLinkResult("no such profile");
             return;
         }
+        link_app_ = profiles_[index].in_menu ? -1 : index;
         if (index != current_app_) {
             if (nav_screen_ == NavScreen::APP) {
                 openApp(index);
@@ -619,6 +829,7 @@ void InterfaceTask::handleLinkMessage(const char* line) {
                 settings_.app = index;
                 current_mode_ = current_module_ = current_page_ = 0;
                 module_pages_.clear();
+                view_page_ = 0;
             }
         }
         sendLinkResult(nullptr);
@@ -629,7 +840,17 @@ void InterfaceTask::handleLinkMessage(const char* line) {
             #if SK_DISPLAY
                 display_task_->showValueText(doc["txt"] | "");
             #endif
+            if (doc["lo"].is<float>() && doc["hi"].is<float>()) {
+                syncLinkValue(doc["v"] | 0.0f, doc["lo"] | 0.0f, doc["hi"] | 0.0f);
+            }
         }
+    } else if (strcmp(type, "media") == 0) {
+        media_state_ = doc["state"] | "";
+        showMediaState();
+    } else if (strcmp(type, "meta") == 0) {
+        // The selected photo's rating and color label
+        link_rating_ = doc["rating"] | 0;
+        link_label_ = doc["label"] | "";
     } else if (strcmp(type, "tool") == 0) {
         link_tool_ = doc["tool"] | "";
         handleTool(link_tool_.c_str());
@@ -951,20 +1172,27 @@ void InterfaceTask::updateTouch() {
     const ProfilePage& page = currentPage();
     switch (gesture) {
         case TouchGesture::TAP:
-            if (!page.pick.empty()) {
+            if (!page.pick.empty() && !edgeButtons().empty()
+                    && tapButton(touch_gestures_.gestureX(), touch_gestures_.gestureY())) {
+                // chose a button round the edge of a picker
+            } else if (!page.pick.empty()) {
                 applyPick();
+            } else if (tapButton(touch_gestures_.gestureX(), touch_gestures_.gestureY())) {
+                // chose a button round the edge
             } else {
                 runAction(page.tap, ActionKind::NONE, true);
             }
             break;
         case TouchGesture::DOUBLE_TAP:  runAction(page.double_tap, ActionKind::NEXT_MODE, true); break;
-        case TouchGesture::TRIPLE_TAP:  runAction(page.triple_tap, ActionKind::NONE, true); break;
+        case TouchGesture::TRIPLE_TAP:
+            runAction(page.triple_tap.isSet() ? page.triple_tap : profiles_[current_app_].triple_tap, ActionKind::NONE, true);
+            break;
         case TouchGesture::LONG_PRESS:  runAction(page.long_press, ActionKind::NEXT_PAGE, true); break;
         case TouchGesture::SWIPE_LEFT:
             if (!page.pick.empty() && !page.swipe_left.isSet()) {
                 // Picker (Color, Rating): swipe left backs out without choosing
                 motor_task_.playHaptic(false);
-                openModule(0);
+                openPage(viewPage(false));
             } else {
                 runAction(page.swipe_left, ActionKind::NONE, false);
             }
@@ -996,7 +1224,8 @@ void InterfaceTask::updateBleOutput() {
 
     // Wait until the motor has switched to the current mode, so a mode change
     // (which resets the value) isn't mistaken for turning the knob
-    if (strcmp(latest_state_.config.text, latest_config_.text) != 0) {
+    if (strcmp(latest_state_.config.text, latest_config_.text) != 0
+        || latest_state_.config.position_nonce != latest_config_.position_nonce) {
         return;
     }
 
@@ -1086,7 +1315,7 @@ void InterfaceTask::updatePowerButton() {
             noteActivity();
             motor_task_.playHaptic(true);
             if (nav_screen_ == NavScreen::APP) {
-                openAppsList(max(menuIndexOf(current_app_), 0));  // main menu
+                openAppsList(0);  // main menu
             } else {
                 openApp(current_app_);       // back to the app
             }
@@ -1246,6 +1475,7 @@ void InterfaceTask::openApp(int app) {
         // A different profile starts at its first mode; returning to the same one keeps your place
         current_mode_ = current_module_ = current_page_ = 0;
         module_pages_.clear();
+        view_page_ = 0;
         mode_before_tool_ = module_before_tool_ = 0;
     }
     current_app_ = app;
@@ -1266,9 +1496,42 @@ void InterfaceTask::applyAppPage() {
     PB_SmartKnobConfig config = page.feel;
 
     UiScreen ui;
+    const ProfileModule& module = profiles_[current_app_].modes[current_mode_].modules[current_module_];
+    bool page_buttons = module.pages.size() > 1 && module.pages.size() <= UI_MAX_ITEMS;
+    for (const ProfilePage& p : module.pages) {
+        page_buttons = page_buttons && p.short_name.length() > 0;
+    }
+    const std::vector<PickOption>& actions = edgeButtons();
+    bool action_buttons = !actions.empty();
+    bool buttons = page_buttons || action_buttons;
+    if (action_buttons) {
+        // Action buttons round the edge; the one that opens this page is highlighted
+        ui.button_count = actions.size();
+        ui.button_selected = 255;
+        for (size_t i = 0; i < actions.size(); i++) {
+            String label = actions[i].label;
+            if (label == "%view%") {
+                label = module.pages[viewPage(true)].label;
+            }
+            strncpy(ui.buttons[i], label.c_str(), sizeof(ui.buttons[i]) - 1);
+            if (actions[i].action.kind == ActionKind::PAGE && actions[i].action.name.indexOf(page.label) >= 0) {
+                ui.button_selected = i;
+            }
+        }
+    }
     if (page.pick.empty()) {
         ui.layout = UiLayout::CONTROL;
-        if (profiles_[current_app_].title_in_center) {
+        if (action_buttons) {
+            // done above
+        } else if (page_buttons) {
+            // Sliders as buttons round the edge; the middle shows the chosen one
+            ui.button_count = module.pages.size();
+            ui.button_selected = current_page_;
+            for (size_t i = 0; i < module.pages.size(); i++) {
+                strncpy(ui.buttons[i], module.pages[i].short_name.c_str(), sizeof(ui.buttons[i]) - 1);
+            }
+        }
+        if (profiles_[current_app_].title_in_center && (!buttons || !page.show_value)) {
             // Profile name in the middle with the page under it; nothing at the top
             snprintf(config.text, sizeof(config.text), "%s\n%s",
                 profiles_[current_app_].name.c_str(), page.label.c_str());
@@ -1277,6 +1540,13 @@ void InterfaceTask::applyAppPage() {
         }
         ui.hide_value = !page.show_value;
         ui.control_style = (UiControlStyle)page.display;
+        if (!page.show_label) {
+            config.text[0] = ' ';   // keeps the page-change check working, draws nothing
+            config.text[1] = 0;
+        }
+        if (page_buttons) {
+            ui.hide_ring = false;   // the small ring in the middle shows the slider's range
+        }
         ui.hide_ring = !page.show_ring;
         strncpy(ui.hint_left, page.hint_left.c_str(), sizeof(ui.hint_left) - 1);
         strncpy(ui.hint_right, page.hint_right.c_str(), sizeof(ui.hint_right) - 1);
@@ -1290,9 +1560,22 @@ void InterfaceTask::applyAppPage() {
         ui.item_count = page.pick.size();
         for (size_t i = 0; i < page.pick.size(); i++) {
             copyText(ui.items[i], page.pick[i].label.c_str());
+            ui.item_icons[i] = (UiIcon)page.pick[i].icon;
+        }
+        ui.list_style = (UiListStyle)page.pick_style;
+        if (ui.list_style != UiListStyle::DRUM) {
+            ui.hide_ring = true;   // the emoji show where you are
         }
         nav_list_count_ = 0;
-        config = makeListConfig(page.label.c_str(), page.pick.size(), 0, 0);
+        int start = 0;
+        if (page.pick_value == "rating") {
+            start = CLAMP(link_rating_, 0, (int)page.pick.size() - 1);
+        } else if (page.pick_value == "label") {
+            for (size_t i = 0; i < page.pick.size(); i++) {
+                if (page.pick[i].label.equalsIgnoreCase(link_label_.c_str())) start = i;
+            }
+        }
+        config = makeListConfig(page.label.c_str(), page.pick.size(), start, 0);
     }
     showUi(ui);
 
@@ -1309,6 +1592,7 @@ void InterfaceTask::applyAppPage() {
     log(buf_);
     applyConfig(config, false);
     sendWhere();
+    showMediaState();
     if (page.turn == TurnOutput::LINK) {
         sendLinkTurn(0);  // "turned 0" = just tell me the current value
     }
@@ -1322,15 +1606,24 @@ void InterfaceTask::openAppsList(int selected) {
     copyText(ui.title, "Menu");
     ui.ring_at_bottom = true;
     ui.show_status = true;
-    ui.item_count = menuAppCount() + MENU_EXTRA_COUNT;
-    for (int i = 0; i < menuAppCount(); i++) {
-        copyText(ui.items[i], profiles_[menu_apps_[i]].name.c_str());
+    // One app to flip to: from a program (Lightroom, Demo) that's Mac; from Mac it's the
+    // program the Mac last asked for, if any. Never both.
+    bool in_menu_app = menuIndexOf(current_app_) >= 0;
+    if (!in_menu_app) {
+        menu_flip_app_ = menu_apps_.empty() ? -1 : menu_apps_[0];
+    } else {
+        menu_flip_app_ = (link_app_ >= 0 && link_app_ != current_app_) ? link_app_ : -1;
+    }
+    int n = 0;
+    if (menu_flip_app_ >= 0) {
+        copyText(ui.items[n++], profiles_[menu_flip_app_].name.c_str());
     }
     for (int i = 0; i < MENU_EXTRA_COUNT; i++) {
-        copyText(ui.items[menuAppCount() + i], menu_extra_names[i]);
+        copyText(ui.items[n++], menu_extra_names[i]);
     }
+    ui.item_count = n;
     showUi(ui);
-    PB_SmartKnobConfig config = makeListConfig("Menu", menuAppCount() + MENU_EXTRA_COUNT, selected, ++nav_nonce_);
+    PB_SmartKnobConfig config = makeListConfig("Menu", n, selected, ++nav_nonce_);
     applyConfig(config, false);
 }
 
@@ -1374,14 +1667,6 @@ void InterfaceTask::openSetting(int item) {
             ui.number_multiplier = 10;
             copyText(ui.suffix, "%");
             config = makeSliderConfig("Click strength", 2, 20, settings_.haptics_pct / 10, ++nav_nonce_);
-            break;
-        case SET_TOUCH:
-            ui.layout = UiLayout::LIST;
-            ui.item_count = COUNT_OF(touch_mode_names);
-                    for (int i = 0; i < ui.item_count; i++) {
-                copyText(ui.items[i], touch_mode_names[i]);
-            }
-            config = makeListConfig("Touch", ui.item_count, settings_.touch_mode, ++nav_nonce_);
             break;
         case SET_AUTO_OFF:
             ui.layout = UiLayout::LIST;
@@ -1444,11 +1729,15 @@ void InterfaceTask::navSelect() {
     int32_t sel = selectedIndex();
     switch (nav_screen_) {
         case NavScreen::APPS_LIST:
-            if (sel < menuAppCount()) {
-                openApp(menu_apps_[sel]);
-            } else if (sel == menuAppCount() + MENU_SETTINGS) {
+            {
+            int apps = menu_flip_app_ >= 0 ? 1 : 0;
+            if (apps && sel == 0) {
+                openApp(menu_flip_app_);
+            } else if (sel == apps + MENU_CONTROLS) {
+                openControls(apps + MENU_CONTROLS);
+            } else if (sel == apps + MENU_SETTINGS) {
                 openSettingsList(0);
-            } else if (sel == menuAppCount() + MENU_SLEEP) {
+            } else if (sel == apps + MENU_SLEEP) {
                 // Screen off; any touch, turn or button press wakes it
                 log("Sleep: screen off (from the menu)");
                 last_activity_ms_ = millis() - SLEEP_SCREEN_OFF_MS;
@@ -1460,17 +1749,17 @@ void InterfaceTask::navSelect() {
                 #endif
             }
             break;
+            }
         case NavScreen::SETTINGS_LIST:
+            if (sel == SET_DEMO) {
+                int demo = findProfile("Demo");
+                if (demo >= 0) openApp(demo);
+                break;
+            }
             openSetting(CLAMP(sel, (int32_t)0, (int32_t)SET_COUNT - 1));
             break;
         case NavScreen::SETTING:
             switch (open_setting_) {
-                case SET_TOUCH:
-                    settings_.touch_mode = CLAMP(sel, (int32_t)0, (int32_t)2);
-                    applySettings();
-                    saveSettings();
-                    openSettingsList(SET_TOUCH);
-                    break;
                 case SET_AUTO_OFF:
                     settings_.auto_off = CLAMP(sel, (int32_t)0, (int32_t)COUNT_OF(auto_off_names) - 1);
                     saveSettings();
@@ -1516,14 +1805,16 @@ void InterfaceTask::navBack() {
     switch (nav_screen_) {
         case NavScreen::SETTING:
             saveSettings();
-            if (open_setting_ == SET_BT_DEVICES) {
+            if (open_setting_ == SET_CONTROLS) {
+                openAppsList(controls_menu_index_);
+            } else if (open_setting_ == SET_BT_DEVICES) {
                 openSetting(SET_BLUETOOTH);
             } else {
                 openSettingsList(open_setting_);
             }
             break;
         case NavScreen::SETTINGS_LIST:
-            openAppsList(menuAppCount() + MENU_SETTINGS);  // back to the main menu, on Settings
+            openAppsList((menu_flip_app_ >= 0 ? 1 : 0) + MENU_SETTINGS);  // back to the main menu, on Settings
             break;
         case NavScreen::APPS_LIST:
             openApp(current_app_);
@@ -1557,8 +1848,7 @@ void InterfaceTask::updateLiveSetting() {
 
 void InterfaceTask::applySettings() {
     #if SK_TOUCH
-        RingMode modes[] = {RingMode::TRACK, RingMode::FOLLOW, RingMode::OFF};
-        ring_mode_ = modes[CLAMP(settings_.touch_mode, (uint8_t)0, (uint8_t)2)];
+        ring_mode_ = RingMode::OFF;   // sliding round the rim is off (it got in the way of the buttons)
     #endif
     // Brightness is applied every loop in updateHardware(); haptics in applyConfig()
 }

@@ -2,6 +2,20 @@
 #include "display_task.h"
 #include "semaphore_guard.h"
 #include "util.h"
+#include "emoji.h"
+
+static const lv_image_dsc_t* iconImage(UiIcon icon, bool small) {
+    switch (icon) {
+        case UiIcon::RED:     return &emoji_red;
+        case UiIcon::YELLOW:  return &emoji_yellow;
+        case UiIcon::GREEN:   return &emoji_green;
+        case UiIcon::BLUE:    return &emoji_blue;
+        case UiIcon::PURPLE:  return &emoji_purple;
+        case UiIcon::STAR:    return small ? &emoji_star_small : &emoji_star;
+        case UiIcon::PALETTE: return &emoji_palette_small;
+        default:              return nullptr;
+    }
+}
 
 static const uint8_t LEDC_CHANNEL_LCD_BACKLIGHT = 0;
 
@@ -112,10 +126,14 @@ void DisplayTask::run() {
         }
         UiValueText value_text;
         if (xQueueReceive(ui_value_queue_, &value_text, 0) == pdTRUE) {
-            memcpy(value_text_, value_text.text, sizeof(value_text_));
-            value_text_[sizeof(value_text_) - 1] = 0;
-            shown_value_ = INT32_MIN;  // redraw
-            updateScreen(last_state_);
+            if (value_text.sub) {
+                lv_label_set_text(sub_label_, value_text.text);
+            } else {
+                memcpy(value_text_, value_text.text, sizeof(value_text_));
+                value_text_[sizeof(value_text_) - 1] = 0;
+                shown_value_ = INT32_MIN;  // redraw
+                updateScreen(last_state_);
+            }
         }
 
         UiStatus status;
@@ -198,6 +216,12 @@ void DisplayTask::buildScreen() {
     lv_obj_align(text_label_, LV_ALIGN_CENTER, 0, 40);
     lv_label_set_text(text_label_, "");
 
+    sub_label_ = lv_label_create(screen);
+    lv_obj_set_style_text_font(sub_label_, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(sub_label_, lv_color_hex(COLOR_TEXT_DIM), 0);
+    lv_obj_align(sub_label_, LV_ALIGN_CENTER, 0, 72);
+    lv_label_set_text(sub_label_, "");
+
     // Spring style: small marks at the two ends of the throw
     for (int i = 0; i < 2; i++) {
         lv_obj_t* mark = lv_obj_create(screen);
@@ -210,7 +234,7 @@ void DisplayTask::buildScreen() {
         end_marks_[i] = mark;
     }
 
-    // Swipe hints at the edges (left, right, up, down)
+    // Swipe hints at the edges (left, right, up, down): a word, a symbol or an emoji
     for (int i = 0; i < 4; i++) {
         lv_obj_t* hint = lv_label_create(screen);
         lv_obj_set_style_text_font(hint, &lv_font_montserrat_14, 0);
@@ -218,7 +242,34 @@ void DisplayTask::buildScreen() {
         lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
         lv_label_set_text(hint, "");
         hint_labels_[i] = hint;
+        hint_images_[i] = lv_image_create(screen);
+        lv_obj_add_flag(hint_images_[i], LV_OBJ_FLAG_HIDDEN);
     }
+
+    // Ring pickers: one emoji per choice around the top edge
+    for (int i = 0; i < UI_MAX_ITEMS; i++) {
+        picker_images_[i] = lv_image_create(screen);
+        lv_obj_add_flag(picker_images_[i], LV_OBJ_FLAG_HIDDEN);
+    }
+
+    // Buttons around the edge: words that follow the edge, with dividing lines between
+    for (int i = 0; i < UI_MAX_ITEMS; i++) {
+        lv_obj_t* button = lv_label_create(screen);
+        lv_obj_set_style_text_font(button, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_align(button, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_transform_pivot_x(button, LV_PCT(50), 0);
+        lv_obj_set_style_transform_pivot_y(button, LV_PCT(50), 0);
+        lv_label_set_text(button, "");
+        lv_obj_add_flag(button, LV_OBJ_FLAG_HIDDEN);
+        button_labels_[i] = button;
+
+        lv_obj_t* line = lv_line_create(screen);
+        lv_obj_set_style_line_width(line, 1, 0);
+        lv_obj_set_style_line_color(line, lv_color_hex(COLOR_TRACK), 0);
+        lv_obj_add_flag(line, LV_OBJ_FLAG_HIDDEN);
+        button_lines_[i] = line;
+    }
+    ring_radius_ = RING_RADIUS;
 
     // Heading for lists and settings
     title_label_ = lv_label_create(screen);
@@ -309,6 +360,9 @@ void DisplayTask::applyLayout() {
     bool list = ui_.layout == UiLayout::LIST;
     bool value = ui_.layout == UiLayout::VALUE;
 
+    bool ring_pick = list && ui_.list_style != UiListStyle::DRUM;
+    bool buttons = (control || ring_pick) && ui_.button_count > 0;
+
     setVisible(text_label_, control);
     setVisible(value_label_, (control && !ui_.hide_value) || (value && ui_.show_number));
 
@@ -316,30 +370,100 @@ void DisplayTask::applyLayout() {
     const char* hints[4] = {ui_.hint_left, ui_.hint_right, ui_.hint_up, ui_.hint_down};
     for (int i = 0; i < 4; i++) {
         bool show = control && hints[i][0] != 0;
-        setVisible(hint_labels_[i], show);
+        // ":name:" at the start = a symbol or emoji; any words after it are shown too
+        const char* symbol = nullptr;
+        UiIcon icon = UiIcon::NONE;
+        lv_color_t color = lv_color_hex(COLOR_TEXT_DIM);
+        const char* word = hints[i];
+        if (strncmp(word, ":x:", 3) == 0) { symbol = LV_SYMBOL_CLOSE; color = lv_color_hex(0x707078); word += 3; }
+        else if (strncmp(word, ":check:", 7) == 0) { symbol = LV_SYMBOL_OK; color = lv_color_white(); word += 7; }
+        else if (strncmp(word, ":palette:", 9) == 0) { icon = UiIcon::PALETTE; word += 9; }
+        else if (strncmp(word, ":star:", 6) == 0) { icon = UiIcon::STAR; word += 6; }
+        while (*word == ' ') word++;
+
+        // Symbols are drawn as part of the label: "symbol\nword" at the sides, "symbol word" top/bottom
+        bool sides = i < 2;
+        if (symbol) {
+            lv_label_set_text_fmt(hint_labels_[i], sides ? "%s\n%s" : "%s %s", symbol, word);
+        } else {
+            lv_label_set_text(hint_labels_[i], word);
+        }
+        lv_obj_set_style_text_font(hint_labels_[i], &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(hint_labels_[i], color, 0);
+        bool has_word = word[0] != 0 || symbol != nullptr;
+        setVisible(hint_labels_[i], show && has_word);
+        setVisible(hint_images_[i], show && icon != UiIcon::NONE);
         if (!show) continue;
+        if (icon != UiIcon::NONE) {
+            lv_image_set_src(hint_images_[i], iconImage(icon, true));
+        }
+        // Emoji at the very edge, its word just inside it
         switch (i) {
             case 0:
-                lv_label_set_text(hint_labels_[i], hints[i]);
-                lv_obj_align(hint_labels_[i], LV_ALIGN_LEFT_MID, 6, 0);
+                lv_obj_align(hint_images_[i], LV_ALIGN_LEFT_MID, 6, 0);
+                lv_obj_align(hint_labels_[i], LV_ALIGN_LEFT_MID, icon != UiIcon::NONE ? 30 : 8, 0);
                 break;
             case 1:
-                lv_label_set_text(hint_labels_[i], hints[i]);
-                lv_obj_align(hint_labels_[i], LV_ALIGN_RIGHT_MID, -6, 0);
+                lv_obj_align(hint_images_[i], LV_ALIGN_RIGHT_MID, -6, 0);
+                lv_obj_align(hint_labels_[i], LV_ALIGN_RIGHT_MID, icon != UiIcon::NONE ? -30 : -8, 0);
                 break;
             case 2:
-                lv_label_set_text(hint_labels_[i], hints[i]);
-                lv_obj_align(hint_labels_[i], LV_ALIGN_TOP_MID, 0, 14);
+                lv_obj_align(hint_images_[i], LV_ALIGN_TOP_MID, 0, 6);
+                lv_obj_align(hint_labels_[i], LV_ALIGN_TOP_MID, 0, icon != UiIcon::NONE ? 30 : 10);
                 break;
             default:
-                lv_label_set_text(hint_labels_[i], hints[i]);
-                lv_obj_align(hint_labels_[i], LV_ALIGN_BOTTOM_MID, 0, -14);
+                lv_obj_align(hint_images_[i], LV_ALIGN_BOTTOM_MID, 0, -6);
+                lv_obj_align(hint_labels_[i], LV_ALIGN_BOTTOM_MID, 0, icon != UiIcon::NONE ? -30 : -10);
                 break;
         }
     }
-    setVisible(title_label_, true);  // app name on control screens, heading elsewhere
-    setVisible(list_box_, list);
-    setVisible(info_label_, value && !ui_.show_number);
+
+    // Ring picker: the choices' emoji spread across the top edge
+    int icon_count = 0;
+    for (int i = 0; i < ui_.item_count; i++) {
+        if (ui_.item_icons[i] != UiIcon::NONE) icon_count++;
+    }
+    for (int i = 0, k = 0; i < UI_MAX_ITEMS; i++) {
+        bool show = ring_pick && i < ui_.item_count && ui_.item_icons[i] != UiIcon::NONE;
+        setVisible(picker_images_[i], show);
+        if (!show) continue;
+        lv_image_set_src(picker_images_[i], iconImage(ui_.item_icons[i], false));
+        float r = uiPickerAngle(k++, icon_count) * PI / 180;
+        int radius = buttons ? UI_PICKER_RADIUS_INNER : UI_PICKER_RADIUS;
+        lv_obj_align(picker_images_[i], LV_ALIGN_CENTER,
+            (int32_t)(radius * cosf(r)), (int32_t)(radius * sinf(r)));
+    }
+
+    // Buttons around the edge: each word turned to follow the edge (never upside
+    // down), the chosen one in the accent color, a thin line between neighbours.
+    // The value ring moves in to the middle so it doesn't cross the words.
+    setRingRadius(RING_RADIUS);   // the ring runs round the outside of the buttons
+    for (int i = 0; i < UI_MAX_ITEMS; i++) {
+        bool show = buttons && i < ui_.button_count;
+        setVisible(button_labels_[i], show);
+        setVisible(button_lines_[i], show);
+        if (!show) continue;
+        lv_label_set_text(button_labels_[i], ui_.buttons[i]);
+        bool chosen = i == ui_.button_selected;
+        lv_obj_set_style_text_color(button_labels_[i],
+            chosen ? lv_color_hex(COLOR_ACCENT_TEXT) : lv_color_hex(COLOR_TEXT_DIM), 0);
+        float angle = wrapDegrees(uiButtonAngle(i, ui_.button_count));
+        float r = angle * PI / 180;
+        lv_obj_align(button_labels_[i], LV_ALIGN_CENTER,
+            (int32_t)(UI_BUTTON_RADIUS * cosf(r)), (int32_t)(UI_BUTTON_RADIUS * sinf(r)));
+        // Along the edge: +90 in the top half, -90 in the bottom half so it still reads left to right
+        float text_angle = (angle > 0 && angle < 180) ? angle - 90 : angle + 90;
+        lv_obj_set_style_transform_rotation(button_labels_[i], (int32_t)(text_angle * 10), 0);
+
+        float gap = (uiButtonAngle(i, ui_.button_count) - 180.0f / ui_.button_count) * PI / 180;
+        button_line_points_[i][0] = { CENTER + UI_BUTTON_LINE_FROM * cosf(gap), CENTER + UI_BUTTON_LINE_FROM * sinf(gap) };
+        button_line_points_[i][1] = { CENTER + UI_BUTTON_LINE_TO * cosf(gap), CENTER + UI_BUTTON_LINE_TO * sinf(gap) };
+        lv_line_set_points(button_lines_[i], button_line_points_[i], 2);
+    }
+    setVisible(list_box_, list && !ring_pick);
+    setVisible(info_label_, (value && !ui_.show_number) || ring_pick);
+    lv_obj_align(info_label_, LV_ALIGN_CENTER, 0, ring_pick && buttons ? 14 : 6);
+    setVisible(title_label_, !ring_pick && !buttons);
     setVisible(status_label_, ui_.show_status);
 
     if (list) {
@@ -361,6 +485,8 @@ void DisplayTask::applyLayout() {
     lv_obj_align(text_label_, LV_ALIGN_CENTER, 0, ui_.hide_value ? 0 : 40);
 
     value_text_[0] = 0;  // a new screen starts without the Mac's value
+    lv_label_set_text(sub_label_, "");
+    setVisible(sub_label_, control);
     // The direction style fades the number; start every screen fully visible
     lv_anim_delete(value_label_, NULL);
     lv_obj_set_style_opa(value_label_, LV_OPA_COVER, 0);
@@ -393,6 +519,10 @@ void DisplayTask::updateScreen(const PB_SmartKnobState& state) {
     // Bounded modes spread their range evenly either side of the top (or the
     // bottom). Either way the first position is on the left.
     float range_degrees = bounded ? fminf((max_position - min_position) * width_degrees, 340) : 0;
+    // Squeezed ranges (more positions than fit round the ring) squeeze the dot's travel too
+    if (bounded && max_position > min_position) {
+        width_degrees = range_degrees / (max_position - min_position);
+    }
     float middle_angle = ui_.ring_at_bottom ? 90 : 270;
     float direction = ui_.ring_at_bottom ? -1 : 1;  // along the bottom, left-to-right is anticlockwise
     float start_angle = middle_angle - direction * range_degrees / 2;
@@ -454,9 +584,30 @@ void DisplayTask::updateScreen(const PB_SmartKnobState& state) {
 
     // Dot on the ring
     float radians = dot_angle * PI / 180;
-    int32_t x = CENTER + (int32_t)(RING_RADIUS * cosf(radians)) - DOT_SIZE / 2;
-    int32_t y = CENTER + (int32_t)(RING_RADIUS * sinf(radians)) - DOT_SIZE / 2;
+    int32_t x = CENTER + (int32_t)(ring_radius_ * cosf(radians)) - DOT_SIZE / 2;
+    int32_t y = CENTER + (int32_t)(ring_radius_ * sinf(radians)) - DOT_SIZE / 2;
     lv_obj_set_pos(dot_, x, y);
+
+    if (ui_.layout == UiLayout::LIST && ui_.list_style != UiListStyle::DRUM) {
+        // Ring picker: brighten the chosen emoji (or all up to it, for stars) and
+        // name it in the middle
+        int32_t count = ui_.item_count;
+        if (count == 0) {
+            return;
+        }
+        int32_t chosen = CLAMP((int32_t)lroundf(position + state.sub_position_unit), (int32_t)0, count - 1);
+        if (chosen == (int32_t)shown_scroll_) {
+            return;
+        }
+        shown_scroll_ = chosen;
+        bool cumulative = ui_.list_style == UiListStyle::RING_COUNT;
+        for (int32_t i = 0; i < count; i++) {
+            bool lit = cumulative ? (i <= chosen) : (i == chosen);
+            lv_obj_set_style_image_opa(picker_images_[i], lit ? LV_OPA_COVER : (cumulative ? 55 : 90), 0);
+        }
+        lv_label_set_text(info_label_, ui_.items[chosen]);
+        return;
+    }
 
     if (ui_.layout == UiLayout::LIST) {
         // Turn the drum so the knob's position (including the part-way turn
@@ -552,6 +703,17 @@ void DisplayTask::updateScreen(const PB_SmartKnobState& state) {
     }
 }
 
+void DisplayTask::setRingRadius(int32_t radius) {
+    if (radius == ring_radius_) {
+        return;
+    }
+    ring_radius_ = radius;
+    lv_obj_set_size(track_arc_, radius * 2, radius * 2);
+    lv_obj_center(track_arc_);
+    lv_obj_set_size(fill_arc_, radius * 2, radius * 2);
+    lv_obj_center(fill_arc_);
+}
+
 void DisplayTask::showScreen(const UiScreen& screen) {
     xQueueOverwrite(ui_screen_queue_, &screen);
 }
@@ -560,8 +722,9 @@ void DisplayTask::showStatus(const UiStatus& status) {
     xQueueOverwrite(ui_status_queue_, &status);
 }
 
-void DisplayTask::showValueText(const char* text) {
+void DisplayTask::showValueText(const char* text, bool sub) {
     UiValueText value;
+    value.sub = sub;
     strncpy(value.text, text, sizeof(value.text) - 1);
     xQueueOverwrite(ui_value_queue_, &value);
 }

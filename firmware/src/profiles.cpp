@@ -21,6 +21,15 @@
 //   "swipe_up", "swipe_down": a key ("p", "shift+]"...) or "next_page", "next_module",
 //   "prev_module", "next_mode", "prev_mode"
 // "pick": [ { "label": "Red", "key": "6" }, ... ] makes a picker page
+// "pick_style": "ring" (emoji round the edge) or "count" (lit up to the choice, e.g. stars);
+//   options can have "icon": red, yellow, green, blue, purple, star
+// "short": a short name on every page of a module puts them as buttons round the edge
+// "buttons": [ { "label": "Pick", "action": "p" }, ... ] = action buttons round the edge (on a
+//   page, or on a module for all its pages); label "%view%" = the other view page's name
+// "pick_value": "rating" / "label" = a picker opens on the photo's current value
+// Actions "module:Color" open that module; keys may be media: play, next, prev, mute
+// "none" switches a gesture's default off; a profile-level "triple_tap" applies to all its pages
+// Hints can be words or ":x:", ":check:", ":palette:", ":star:"
 // "display": "spring" (speed meter) or "direction" (flashing arrow) for the control screen
 // "show_value": false hides the number, "ring": false hides the ring,
 // "hints": { "left": "Reject", "right": "Pick", "up": "Label", "down": "Stars" } at the edges
@@ -35,16 +44,18 @@
 static const char MAC_PROFILE[] = R"JSON(
 {
   "name": "Mac",
+  "mode_toasts": false,
   "modes": [
     { "name": "Volume", "modules": [ { "name": "Volume", "pages": [
-      { "label": "Volume", "turn": "volume", "swipe_left": "next_mode", "swipe_right": "prev_mode",
+      { "label": "Volume", "turn": "volume", "swipe_up": "next_mode", "swipe_down": "prev_mode",
+        "tap": "play", "swipe_right": "next", "swipe_left": "prev", "long_press": "mute",
         "feel": { "min": 0, "max": 64, "start": 32, "step_deg": 5, "detent": 0.8 } } ] } ] },
     { "name": "Scroll", "modules": [ { "name": "Scroll", "pages": [
-      { "label": "Scroll", "turn": "scroll", "swipe_left": "next_mode", "swipe_right": "prev_mode",
+      { "label": "Scroll", "turn": "scroll", "swipe_up": "next_mode", "swipe_down": "prev_mode",
         "display": "spring",
         "feel": { "min": 0, "max": 0, "step_deg": 60 } } ] } ] },
     { "name": "Arrows", "modules": [ { "name": "Arrows", "pages": [
-      { "label": "Arrows", "sub": "Left / Right", "turn": "arrows", "swipe_left": "next_mode", "swipe_right": "prev_mode",
+      { "label": "Arrows", "sub": "Left / Right", "turn": "arrows", "swipe_up": "next_mode", "swipe_down": "prev_mode",
         "display": "direction", "ring": false,
         "feel": { "step_deg": 15, "detent": 1 } } ] } ] }
   ]
@@ -58,59 +69,64 @@ static const char LIGHTROOM_PROFILE[] = R"JSON(
 {
   "name": "Lightroom",
   "menu": false,
-  "title_in_center": true,
+  "triple_tap": "cmd+z",
   "modes": [
     { "name": "Library", "module": "library", "modules": [
-      { "name": "Library", "pages": [
+      { "name": "Library",
+        "buttons": [ { "label": "Zoom", "action": "page:Thumbnails|Zoom" }, { "label": "Target", "action": "b" },
+                     { "label": "Rating", "action": "page:Rating" }, { "label": "Unflag", "action": "u" },
+                     { "label": "Color", "action": "page:Color" }, { "label": "%view%", "action": "view" } ],
+        "pages": [
         { "label": "Grid", "enter": "g",
-          "turn": { "cw": "right", "ccw": "left" }, "rim": { "cw": "=", "ccw": "-" },
-          "tap": "next_page", "swipe_left": "x", "swipe_right": "p", "long_press": "u",
-          "show_value": false, "ring": false,
-          "hints": { "left": "Reject", "right": "Pick", "up": "Color", "down": "Rating" },
+          "turn": { "cw": "right", "ccw": "left" },
+          "swipe_left": "x", "swipe_right": "p", "show_value": false, "show_label": false, "ring": false,
           "feel": { "step_deg": 15, "detent": 1 } },
         { "label": "Loupe", "enter": "e",
-          "turn": { "cw": "right", "ccw": "left" }, "rim": { "cw": "cmd+=", "ccw": "cmd+-" },
-          "tap": "next_page", "swipe_left": "x", "swipe_right": "p", "long_press": "u",
-          "show_value": false, "ring": false,
-          "hints": { "left": "Reject", "right": "Pick", "up": "Color", "down": "Rating" },
-          "feel": { "step_deg": 15, "detent": 1 } } ] },
-      { "name": "Color", "pages": [
-        { "label": "Color", "pick": [
-          { "label": "Red", "key": "6" }, { "label": "Yellow", "key": "7" },
-          { "label": "Green", "key": "8" }, { "label": "Blue", "key": "9" },
-          { "label": "Purple", "key": "link:label:Purple" } ] } ] },
-      { "name": "Rating", "pages": [
-        { "label": "Rating", "pick": [
-          { "label": "No stars", "key": "0" }, { "label": "1 star", "key": "1" },
-          { "label": "2 stars", "key": "2" }, { "label": "3 stars", "key": "3" },
-          { "label": "4 stars", "key": "4" }, { "label": "5 stars", "key": "5" } ] } ] } ] },
+          "turn": { "cw": "right", "ccw": "left" },
+          "swipe_left": "x", "swipe_right": "p", "long_press": "none", "show_value": false, "show_label": false, "ring": false,
+          "feel": { "step_deg": 15, "detent": 1 } },
+        { "label": "Thumbnails", "turn": { "cw": "=", "ccw": "-" }, "swipe_left": "page:Grid", "long_press": "none",
+          "show_value": false, "feel": { "min": 0, "max": 16, "start": 8, "step_deg": 12, "detent": 0.6 } },
+        { "label": "Zoom", "turn": { "cw": "cmd+=", "ccw": "cmd+-" }, "swipe_left": "page:Loupe", "long_press": "none",
+          "show_value": false, "feel": { "min": 0, "max": 16, "start": 8, "step_deg": 12, "detent": 0.6 } },
+        { "label": "Rating", "pick_style": "count", "pick_value": "rating", "pick": [
+          { "label": "No stars", "key": "0" }, { "label": "1 star", "key": "1", "icon": "star" },
+          { "label": "2 stars", "key": "2", "icon": "star" }, { "label": "3 stars", "key": "3", "icon": "star" },
+          { "label": "4 stars", "key": "4", "icon": "star" }, { "label": "5 stars", "key": "5", "icon": "star" } ] },
+        { "label": "Color", "pick_style": "ring", "pick_value": "label", "pick": [
+          { "label": "Red", "key": "6", "icon": "red" }, { "label": "Yellow", "key": "7", "icon": "yellow" },
+          { "label": "Green", "key": "8", "icon": "green" }, { "label": "Blue", "key": "9", "icon": "blue" },
+          { "label": "Purple", "key": "link:label:Purple", "icon": "purple" } ] } ] } ] },
     { "name": "Develop", "module": "develop", "modules": [
-      { "name": "Exposure", "pages": [ { "label": "Exposure", "enter": "d", "turn": { "param": "Exposure2012" }, "tap": "link:reset",
-          "feel": { "step_deg": 4, "detent": 0.4 } } ] },
-      { "name": "Contrast", "pages": [ { "label": "Contrast", "enter": "d", "turn": { "param": "Contrast2012" }, "tap": "link:reset",
-          "feel": { "step_deg": 4, "detent": 0.4 } } ] },
-      { "name": "Highlights", "pages": [ { "label": "Highlights", "enter": "d", "turn": { "param": "Highlights2012" }, "tap": "link:reset",
-          "feel": { "step_deg": 4, "detent": 0.4 } } ] },
-      { "name": "Shadows", "pages": [ { "label": "Shadows", "enter": "d", "turn": { "param": "Shadows2012" }, "tap": "link:reset",
-          "feel": { "step_deg": 4, "detent": 0.4 } } ] },
-      { "name": "Whites", "pages": [ { "label": "Whites", "enter": "d", "turn": { "param": "Whites2012" }, "tap": "link:reset",
-          "feel": { "step_deg": 4, "detent": 0.4 } } ] },
-      { "name": "Blacks", "pages": [ { "label": "Blacks", "enter": "d", "turn": { "param": "Blacks2012" }, "tap": "link:reset",
-          "feel": { "step_deg": 4, "detent": 0.4 } } ] },
-      { "name": "Temp", "pages": [ { "label": "Temp", "enter": "d", "turn": { "param": "Temperature" }, "tap": "link:reset",
-          "feel": { "step_deg": 4, "detent": 0.4 } } ] },
-      { "name": "Tint", "pages": [ { "label": "Tint", "enter": "d", "turn": { "param": "Tint" }, "tap": "link:reset",
-          "feel": { "step_deg": 4, "detent": 0.4 } } ] },
-      { "name": "Texture", "pages": [ { "label": "Texture", "enter": "d", "turn": { "param": "Texture" }, "tap": "link:reset",
-          "feel": { "step_deg": 4, "detent": 0.4 } } ] },
-      { "name": "Clarity", "pages": [ { "label": "Clarity", "enter": "d", "turn": { "param": "Clarity2012" }, "tap": "link:reset",
-          "feel": { "step_deg": 4, "detent": 0.4 } } ] },
-      { "name": "Dehaze", "pages": [ { "label": "Dehaze", "enter": "d", "turn": { "param": "Dehaze" }, "tap": "link:reset",
-          "feel": { "step_deg": 4, "detent": 0.4 } } ] },
-      { "name": "Vibrance", "pages": [ { "label": "Vibrance", "enter": "d", "turn": { "param": "Vibrance" }, "tap": "link:reset",
-          "feel": { "step_deg": 4, "detent": 0.4 } } ] },
-      { "name": "Saturation", "pages": [ { "label": "Saturation", "enter": "d", "turn": { "param": "Saturation" }, "tap": "link:reset",
-          "feel": { "step_deg": 4, "detent": 0.4 } } ] } ] },
+      { "name": "Exposure", "pages": [
+          { "label": "Exposure", "short": "Exposure", "enter": "d", "turn": { "param": "Exposure2012" }, "long_press": "link:reset",
+            "feel": { "min": -100, "max": 100, "start": 0, "step_deg": 3, "detent": 0.4 } },
+          { "label": "Whites", "short": "Whites", "enter": "d", "turn": { "param": "Whites2012" }, "long_press": "link:reset",
+            "feel": { "min": -100, "max": 100, "start": 0, "step_deg": 3, "detent": 0.4 } },
+          { "label": "Blacks", "short": "Blacks", "enter": "d", "turn": { "param": "Blacks2012" }, "long_press": "link:reset",
+            "feel": { "min": -100, "max": 100, "start": 0, "step_deg": 3, "detent": 0.4 } },
+          { "label": "Contrast", "short": "Contrast", "enter": "d", "turn": { "param": "Contrast2012" }, "long_press": "link:reset",
+            "feel": { "min": -100, "max": 100, "start": 0, "step_deg": 3, "detent": 0.4 } },
+          { "label": "Shadows", "short": "Shadows", "enter": "d", "turn": { "param": "Shadows2012" }, "long_press": "link:reset",
+            "feel": { "min": -100, "max": 100, "start": 0, "step_deg": 3, "detent": 0.4 } },
+          { "label": "Highlights", "short": "Highlights", "enter": "d", "turn": { "param": "Highlights2012" }, "long_press": "link:reset",
+            "feel": { "min": -100, "max": 100, "start": 0, "step_deg": 3, "detent": 0.4 } } ] },
+      { "name": "Presence", "pages": [
+          { "label": "Texture", "short": "Texture", "enter": "d", "turn": { "param": "Texture" }, "long_press": "link:reset",
+            "feel": { "min": -100, "max": 100, "start": 0, "step_deg": 3, "detent": 0.4 } },
+          { "label": "Clarity", "short": "Clarity", "enter": "d", "turn": { "param": "Clarity2012" }, "long_press": "link:reset",
+            "feel": { "min": -100, "max": 100, "start": 0, "step_deg": 3, "detent": 0.4 } },
+          { "label": "Dehaze", "short": "Dehaze", "enter": "d", "turn": { "param": "Dehaze" }, "long_press": "link:reset",
+            "feel": { "min": -100, "max": 100, "start": 0, "step_deg": 3, "detent": 0.4 } },
+          { "label": "Vibrance", "short": "Vibrance", "enter": "d", "turn": { "param": "Vibrance" }, "long_press": "link:reset",
+            "feel": { "min": -100, "max": 100, "start": 0, "step_deg": 3, "detent": 0.4 } },
+          { "label": "Saturation", "short": "Saturation", "enter": "d", "turn": { "param": "Saturation" }, "long_press": "link:reset",
+            "feel": { "min": -100, "max": 100, "start": 0, "step_deg": 3, "detent": 0.4 } } ] },
+      { "name": "Color", "pages": [
+          { "label": "Temp", "short": "Temp", "enter": "d", "turn": { "param": "Temperature" }, "long_press": "link:reset",
+            "feel": { "min": -100, "max": 100, "start": 0, "step_deg": 3, "detent": 0.4 } },
+          { "label": "Tint", "short": "Tint", "enter": "d", "turn": { "param": "Tint" }, "long_press": "link:reset",
+            "feel": { "min": -100, "max": 100, "start": 0, "step_deg": 3, "detent": 0.4 } } ] } ] },
     { "name": "Brush", "tools": [ "masking", "dust", "localized" ], "modules": [ { "name": "Brush", "pages": [
       { "label": "Brush size",
         "turn": { "cw": "]", "ccw": "[" },
@@ -128,6 +144,7 @@ static const char LIGHTROOM_PROFILE[] = R"JSON(
 static const char DEMO_PROFILE[] = R"JSON(
 {
   "name": "Demo",
+  "menu": false,
   "modes": [
     { "name": "Unbounded", "modules": [ { "name": "", "pages": [
       { "label": "Unbounded", "sub": "No detents", "feel": { "step_deg": 10, "hue": 200 } } ] } ] },
@@ -203,6 +220,14 @@ bool parseKeyCombo(const char* text, KeyCombo& out) {
             out.key = codes[found - punct];
         }
         return true;
+    }
+    struct Media { const char* name; uint32_t code; };
+    static const Media media[] = { {"play", 0x800}, {"next", 0x20}, {"prev", 0x40}, {"mute", 0x1000} };
+    for (const Media& m : media) {
+        if (k == m.name) {
+            out.media = m.code;
+            return true;
+        }
     }
     struct Named { const char* name; uint8_t code; };
     static const Named named[] = {
@@ -288,12 +313,32 @@ static bool readAction(JsonVariantConst value, Action& out, String& error) {
             return true;
         }
     }
+    out.name = text ? text : "";
+    if (text != nullptr && strcmp(text, "none") == 0) {
+        out.kind = ActionKind::NOTHING;
+        return true;
+    }
+    if (text != nullptr && strncmp(text, "page:", 5) == 0) {
+        out.kind = ActionKind::PAGE;
+        out.name = text + 5;
+        return true;
+    }
+    if (text != nullptr && strcmp(text, "view") == 0) {
+        out.kind = ActionKind::VIEW;
+        return true;
+    }
+    if (text != nullptr && strncmp(text, "module:", 7) == 0) {
+        out.kind = ActionKind::MODULE;
+        out.name = text + 7;
+        return true;
+    }
     if (text != nullptr && strncmp(text, "link:", 5) == 0) {
         out.kind = ActionKind::LINK;   // e.g. "link:reset", carried out by the Mac
         out.name = text + 5;
         return true;
     }
     out.kind = ActionKind::KEY;
+    out.name = text ? text : "";   // kept for the Controls screen
     return readKey(value, out.key, error);
 }
 
@@ -312,6 +357,8 @@ bool parseProfile(const char* json, Profile& out, String& error) {
     }
     out.in_menu = doc["menu"] | true;
     out.title_in_center = doc["title_in_center"] | false;
+    out.mode_toasts = doc["mode_toasts"] | true;
+    if (!readAction(doc["triple_tap"], out.triple_tap, error)) return false;
     for (JsonObjectConst m : doc["modes"].as<JsonArrayConst>()) {
         ProfileMode mode;
         mode.name = m["name"] | "";
@@ -322,6 +369,12 @@ bool parseProfile(const char* json, Profile& out, String& error) {
         for (JsonObjectConst mod : m["modules"].as<JsonArrayConst>()) {
             ProfileModule module;
             module.name = mod["name"] | "";
+            for (JsonObjectConst o : mod["buttons"].as<JsonArrayConst>()) {
+                PickOption button;
+                button.label = o["label"] | "";
+                if (!readAction(o["action"], button.action, error)) return false;
+                module.buttons.push_back(button);
+            }
             for (JsonObjectConst p : mod["pages"].as<JsonArrayConst>()) {
                 ProfilePage page;
                 page.label = p["label"] | "";
@@ -351,10 +404,30 @@ bool parseProfile(const char* json, Profile& out, String& error) {
                 for (JsonObjectConst o : p["pick"].as<JsonArrayConst>()) {
                     PickOption option;
                     option.label = o["label"] | "";
+                    const char* icon = o["icon"] | "";
+                    static const char* const icons[] = {"", "red", "yellow", "green", "blue", "purple", "star", "palette"};
+                    for (uint8_t n = 0; n < sizeof(icons) / sizeof(icons[0]); n++) {
+                        if (strcmp(icon, icons[n]) == 0) option.icon = n;
+                    }
                     if (!readAction(o["key"], option.action, error)) return false;
                     page.pick.push_back(option);
                 }
                 page.show_value = p["show_value"] | true;
+                page.show_label = p["show_label"] | true;
+                const char* pick_style = p["pick_style"] | "";
+                page.pick_style = strcmp(pick_style, "ring") == 0 ? 1 : (strcmp(pick_style, "count") == 0 ? 2 : 0);
+                page.short_name = p["short"] | "";
+                page.pick_value = p["pick_value"] | "";
+                for (JsonObjectConst o : p["buttons"].as<JsonArrayConst>()) {
+                    PickOption button;
+                    button.label = o["label"] | "";
+                    if (!readAction(o["action"], button.action, error)) return false;
+                    page.buttons.push_back(button);
+                }
+                if (page.buttons.size() > 8) {
+                    error = "at most 8 buttons";
+                    return false;
+                }
                 const char* display = p["display"] | "";
                 page.display = strcmp(display, "spring") == 0 ? 1 : (strcmp(display, "direction") == 0 ? 2 : 0);
                 page.show_ring = p["ring"] | true;

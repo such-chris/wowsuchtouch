@@ -149,11 +149,26 @@ class InterfaceTask : public Task<InterfaceTask>, public Logger {
         std::vector<int> module_pages_;   // last page used in each module of this mode
         void sendKey(const KeyCombo& combo, int32_t times = 1);
         bool runAction(const Action& action, ActionKind fallback, bool strong);
-        void applyPick();
+        void applyPick(bool go_back = true);
+        String media_state_;   // "playing" / "paused" / "" from the Mac
+        void showMediaState();
+        bool tapButton(uint16_t x, uint16_t y);   // tap on an edge button: choose that page
         void openMode(int mode, int module);
         void handleTool(const char* tool);
         void handleModule(const char* module);
         String link_module_, link_tool_;   // last module / tool the Mac reported
+        int link_app_ = -1;                // profile the Mac last asked for (-1 = none); shown in the menu
+        int menu_flip_app_ = -1;           // the one app the menu offers to flip to (-1 = none)
+        int link_rating_ = 0;              // the photo's rating and color label, from the Mac
+        String link_label_;
+        void openModuleNamed(const char* name);
+        void openPage(int page);
+        int viewPage(bool other);         // the last "view" page of this module (or the other one)
+        int view_page_ = 0;
+        const std::vector<PickOption>& edgeButtons();
+        void syncLinkValue(float value, float low, float high);
+        void openControls(int menu_index);
+        int controls_menu_index_ = 0;
         int mode_before_tool_ = 0;     // where to return when a tool mode (e.g. Brush) closes
         int module_before_tool_ = 0;
         void sendLinkTurn(int32_t steps);

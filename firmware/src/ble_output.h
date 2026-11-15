@@ -22,6 +22,7 @@ class BleOutput {
         void arrowSteps(int32_t steps);              // right / left arrow keys
         // A keyboard shortcut (HID modifier bits + key code), pressed `times` times
         void sendKey(uint8_t modifiers, uint8_t key, int32_t times = 1);
+        void sendMediaKey(uint32_t media_key);   // play/pause, next, previous, mute
 
         // Forget every paired Mac/iPad (they'll need to pair again)
         void forgetAllDevices();

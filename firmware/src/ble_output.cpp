@@ -207,6 +207,12 @@ void BleOutput::sendKey(uint8_t modifiers, uint8_t key, int32_t times) {
     }
 }
 
+void BleOutput::sendMediaKey(uint32_t media_key) {
+    if (!isConnected() || media_key == 0) return;
+    releaseModifiers();
+    tapMediaKey(media_key);
+}
+
 void BleOutput::forgetAllDevices() {
     if (!ready_) {
         return;
