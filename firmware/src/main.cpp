@@ -27,7 +27,7 @@ void setup() {
   // on, so unplugging switches it straight back off. Restarts by the firmware
   // itself (e.g. after "Forget all") always start normally.
   bool charger_start = false;
-  #ifdef PIN_POWER_BUTTON
+  #if defined(PIN_POWER_BUTTON) && SK_CHARGER_SCREEN
   pinMode(PIN_POWER_BUTTON, INPUT_PULLUP);
   bool button_held = digitalRead(PIN_POWER_BUTTON) == LOW;
   charger_start = esp_reset_reason() == ESP_RST_POWERON && !button_held;
