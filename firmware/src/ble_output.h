@@ -50,6 +50,11 @@ class BleOutput {
         uint32_t pairing_end_ms_ = 0;   // 0 = stays open until a device pairs
         int bonds_at_open_ = 0;
 
+        // The library starts Bluetooth in the background, so NimBLE can't be
+        // touched until that's finished. update() checks and then sets this.
+        bool ready_ = false;
+        uint32_t begin_ms_ = 0;
+
         void tapMediaKey(uint32_t media_key);
         void tapKey(uint8_t key);
 

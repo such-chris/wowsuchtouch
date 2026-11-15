@@ -37,17 +37,14 @@ void BleOutput::begin(const char* device_name) {
     hid_ = new BleCompositeHID(device_name, "SmartKnob", 100);
     hid_->addDevice(keyboard_);
     hid_->addDevice(mouse_);
-    hid_->begin();
-
-    // Nothing paired yet: stay open until the first device pairs
-    if (NimBLEDevice::getNumBonds() == 0) {
-        openPairing(0);
-    } else {
-        applyAdvertising();
-    }
+    hid_->begin();  // starts Bluetooth in the background; see update()
+    begin_ms_ = millis();
 }
 
 void BleOutput::applyAdvertising() {
+    if (!ready_) {
+        return;  // applied once Bluetooth has finished starting
+    }
     // Rebuild the allowed list from the devices we've paired with
     while (NimBLEDevice::getWhiteListCount() > 0) {
         NimBLEDevice::whiteListRemove(NimBLEDevice::getWhiteListAddress(0));
@@ -67,7 +64,7 @@ void BleOutput::applyAdvertising() {
 
 void BleOutput::openPairing(uint32_t duration_ms) {
     pairing_ = true;
-    bonds_at_open_ = NimBLEDevice::getNumBonds();
+    bonds_at_open_ = ready_ ? NimBLEDevice::getNumBonds() : 0;
     pairing_end_ms_ = duration_ms == 0 ? 0 : millis() + duration_ms;
     if (pairing_end_ms_ == 0 && duration_ms != 0) {
         pairing_end_ms_ = 1;  // (0 means "no time limit")
@@ -84,7 +81,7 @@ uint32_t BleOutput::pairingSecondsLeft(uint32_t now_ms) const {
 }
 
 int BleOutput::pairedCount() {
-    return NimBLEDevice::getNumBonds();
+    return ready_ ? NimBLEDevice::getNumBonds() : 0;
 }
 
 bool BleOutput::isConnected() {
@@ -116,6 +113,27 @@ void BleOutput::releaseModifiers() {
 PairingEvent BleOutput::update(uint32_t now_ms) {
     if (held_modifiers_ && now_ms - last_hold_use_ms_ > MODIFIER_RELEASE_MS) {
         releaseModifiers();
+    }
+
+    if (hid_ == nullptr) {
+        return PairingEvent::NONE;  // Bluetooth not started (e.g. charging screen)
+    }
+
+    if (!ready_) {
+        // Wait for the library's background start-up to finish (it starts
+        // advertising last), then apply our pairing rule once
+        bool started = NimBLEDevice::isInitialized()
+            && (NimBLEDevice::getAdvertising()->isAdvertising() || isConnected() || now_ms - begin_ms_ > 3000);
+        if (!started) {
+            return PairingEvent::NONE;
+        }
+        ready_ = true;
+        if (NimBLEDevice::getNumBonds() == 0) {
+            openPairing(0);  // nothing paired yet: stay open until the first device pairs
+        } else {
+            bonds_at_open_ = NimBLEDevice::getNumBonds();
+            applyAdvertising();
+        }
     }
 
     if (pairing_) {
@@ -176,6 +194,9 @@ void BleOutput::arrowSteps(int32_t steps) {
 }
 
 void BleOutput::forgetAllDevices() {
+    if (!ready_) {
+        return;
+    }
     NimBLEDevice::deleteAllBonds();
     openPairing(0);  // nothing paired any more, so stay open for a new device
 }
