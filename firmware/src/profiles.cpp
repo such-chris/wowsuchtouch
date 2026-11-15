@@ -48,7 +48,7 @@ static const char MAC_PROFILE[] = R"JSON(
   "modes": [
     { "name": "Volume", "modules": [ { "name": "Volume", "pages": [
       { "label": "Volume", "turn": "volume", "swipe_up": "next_mode", "swipe_down": "prev_mode",
-        "tap": "play", "swipe_right": "next", "swipe_left": "prev", "long_press": "mute",
+        "tap": "play", "swipe_right": "next", "swipe_left": "prev", "double_tap": "mute", "long_press": "none",
         "feel": { "min": 0, "max": 64, "start": 32, "step_deg": 5, "detent": 0.8 } } ] } ] },
     { "name": "Scroll", "modules": [ { "name": "Scroll", "pages": [
       { "label": "Scroll", "turn": "scroll", "swipe_up": "next_mode", "swipe_down": "prev_mode",

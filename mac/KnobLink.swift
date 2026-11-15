@@ -8,11 +8,16 @@
 //   Front: Safari (com.apple.Safari) -> Mac
 // Copy an ID into appProfiles below to give that program its own profile.
 //
+// It reaches the knob over USB when plugged in, otherwise over Bluetooth, through a
+// vendor report carried inside the knob's keyboard. macOS may ask for Input Monitoring
+// permission the first time.
+//
 // It also connects to the SmartKnob Lightroom plugin (if Lightroom is open) and
 // passes messages between it and the knob: knob turns -> plugin, slider values and
 // the open tool -> knob.
 
 import AppKit
+import IOKit.hid
 import Foundation
 
 // ---------------- Settings ----------------
@@ -159,10 +164,146 @@ final class SocketChannel: LineChannel {
     }
 }
 
+// ---------------- Bluetooth link ----------------
+// macOS hides Bluetooth keyboards from apps, so instead the knob carries our
+// messages as an extra "vendor" report inside its keyboard. The Mac's HID system
+// lets us read and write those for one device: 32 bytes per report, lines split
+// across reports and padded with zeros.
+
+let LINK_USAGE_PAGE = 0xFF60
+let LINK_USAGE = 0x61
+let LINK_REPORT_ID: UInt8 = 0x50
+let LINK_REPORT_BYTES = 32
+
+final class KnobBluetooth {
+    private var manager: IOHIDManager
+    private var device: IOHIDDevice?
+    private var reportBuffer = [UInt8](repeating: 0, count: 64)
+    private var buffer = Data()
+    var onLine: ((String) -> Void)?
+    var onConnect: (() -> Void)?
+    var onDisconnect: (() -> Void)?
+    var isOpen: Bool { return device != nil }
+
+    init() {
+        manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
+        let match: [String: Any] = [kIOHIDDeviceUsagePageKey as String: LINK_USAGE_PAGE,
+                                    kIOHIDDeviceUsageKey as String: LINK_USAGE]
+        IOHIDManagerSetDeviceMatching(manager, match as CFDictionary)
+        let context = Unmanaged.passUnretained(self).toOpaque()
+        IOHIDManagerRegisterDeviceMatchingCallback(manager, { context, _, _, device in
+            Unmanaged<KnobBluetooth>.fromOpaque(context!).takeUnretainedValue().attached(device)
+        }, context)
+        IOHIDManagerRegisterDeviceRemovalCallback(manager, { context, _, _, device in
+            Unmanaged<KnobBluetooth>.fromOpaque(context!).takeUnretainedValue().removed(device)
+        }, context)
+        IOHIDManagerScheduleWithRunLoop(manager, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
+        let opened = IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
+        if opened != kIOReturnSuccess {
+            print("HID: couldn't open the HID system (\(opened)); check Input Monitoring permission")
+        }
+    }
+
+    private var listed = false
+    func tryOpen() {
+        // One-time listing of every HID device called SmartKnob, so we can see what the
+        // Mac thinks the knob offers
+        guard !listed else { return }
+        listed = true
+        let all = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
+        IOHIDManagerSetDeviceMatching(all, nil)
+        let devices = (IOHIDManagerCopyDevices(all) as? Set<IOHIDDevice>) ?? []
+        var lines: [String] = []
+        for dev in devices {
+            let name = IOHIDDeviceGetProperty(dev, kIOHIDProductKey as CFString) as? String ?? "?"
+            guard name.localizedCaseInsensitiveContains("knob") else { continue }
+            let page = IOHIDDeviceGetProperty(dev, kIOHIDPrimaryUsagePageKey as CFString) as? Int ?? 0
+            let usage = IOHIDDeviceGetProperty(dev, kIOHIDPrimaryUsageKey as CFString) as? Int ?? 0
+            let transport = IOHIDDeviceGetProperty(dev, kIOHIDTransportKey as CFString) as? String ?? "?"
+            lines.append("\(name) [\(transport)] page 0x\(String(page, radix: 16)) usage 0x\(String(usage, radix: 16))")
+        }
+        print("HID: knob devices seen: \(lines.isEmpty ? "none" : lines.joined(separator: "; "))")
+    }
+
+    private func attached(_ dev: IOHIDDevice) {
+        guard device == nil else { return }
+        guard IOHIDDeviceOpen(dev, IOOptionBits(kIOHIDOptionsTypeNone)) == kIOReturnSuccess else {
+            print("Knob (Bluetooth): found but couldn't open it")
+            return
+        }
+        device = dev
+        buffer.removeAll()
+        let context = Unmanaged.passUnretained(self).toOpaque()
+        reportBuffer.withUnsafeMutableBufferPointer { buf in
+            IOHIDDeviceRegisterInputReportCallback(dev, buf.baseAddress!, buf.count, { context, _, _, _, reportID, report, length in
+                Unmanaged<KnobBluetooth>.fromOpaque(context!).takeUnretainedValue().gotReport(reportID, report, length)
+            }, context)
+        }
+        print("Knob (Bluetooth): connected")
+        onConnect?()
+    }
+
+    private func removed(_ dev: IOHIDDevice) {
+        guard device == dev else { return }
+        device = nil
+        buffer.removeAll()
+        print("Knob (Bluetooth): disconnected")
+        onDisconnect?()
+    }
+
+    private func gotReport(_ reportID: UInt32, _ report: UnsafeMutablePointer<UInt8>, _ length: Int) {
+        guard reportID == UInt32(LINK_REPORT_ID) else { return }
+        var bytes = Array(UnsafeBufferPointer(start: report, count: length))
+        if bytes.first == LINK_REPORT_ID && bytes.count > LINK_REPORT_BYTES { bytes.removeFirst() }
+        buffer.append(contentsOf: bytes.filter { $0 != 0 })   // zeros are padding
+        while let newline = buffer.firstIndex(of: 10) {
+            let lineData = buffer.subdata(in: buffer.startIndex..<newline)
+            buffer.removeSubrange(buffer.startIndex...newline)
+            if let line = String(data: lineData, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines), !line.isEmpty {
+                onLine?(line)
+            }
+        }
+    }
+
+    func sendLine(_ line: String) {
+        guard let device = device else { return }
+        var data = Array(line.utf8)
+        data.append(10)
+        var offset = 0
+        while offset < data.count {
+            let end = min(offset + LINK_REPORT_BYTES, data.count)
+            var report = [LINK_REPORT_ID] + Array(data[offset..<end])
+            report += [UInt8](repeating: 0, count: LINK_REPORT_BYTES + 1 - report.count)
+            let result = IOHIDDeviceSetReport(device, kIOHIDReportTypeOutput, CFIndex(LINK_REPORT_ID), report, report.count)
+            if result != kIOReturnSuccess {
+                print("Knob (Bluetooth): write failed (\(result))")
+                return
+            }
+            offset = end
+        }
+    }
+
+    func send(_ message: [String: Any]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: message),
+              let line = String(data: data, encoding: .utf8) else { return }
+        sendLine(line)
+    }
+}
+
 // ---------------- Following the program in front ----------------
 
 final class Link {
     let port = KnobPort()
+    let bluetooth = KnobBluetooth()
+    // Whichever is connected; USB wins when both are (it's faster and shows logs)
+    var knobOpen: Bool { return port.isOpen || bluetooth.isOpen }
+    func knobSendLine(_ line: String) {
+        if port.isOpen { port.sendLine(line) } else { bluetooth.sendLine(line) }
+    }
+    func knobSend(_ message: [String: Any]) {
+        if port.isOpen { port.send(message) } else { bluetooth.send(message) }
+    }
     let toPlugin = SocketChannel(name: "Lightroom plugin (in)", port: LIGHTROOM_TO_PLUGIN_PORT)
     let fromPlugin = SocketChannel(name: "Lightroom plugin (out)", port: LIGHTROOM_FROM_PLUGIN_PORT)
     var knobProfiles: [String] = []   // from the knob's hello
@@ -177,6 +318,17 @@ final class Link {
             self?.port.send(["t": "hello"])
         }
         port.onLine = { [weak self] line in self?.handle(line) }
+        port.onClose = { [weak self] in self?.knobProfiles = []; self?.bluetooth.tryOpen() }
+        bluetooth.onConnect = { [weak self] in
+            guard let self = self, !self.port.isOpen else { return }
+            self.knobProfiles = []
+            self.bluetooth.send(["t": "hello"])
+        }
+        bluetooth.onLine = { [weak self] line in
+            guard let self = self, !self.port.isOpen else { return }   // USB is in charge when open
+            self.handle(line)
+        }
+        bluetooth.onDisconnect = { [weak self] in if self?.port.isOpen == false { self?.knobProfiles = [] } }
         // Everything the plugin says goes straight to the knob (values, the open tool)
         fromPlugin.onLine = { [weak self] line in
             if line.contains("\"tool\"") || line.contains("\"module\"") || line.contains("\"meta\"") {
@@ -184,7 +336,7 @@ final class Link {
                 if key != "meta" { print("Lightroom: \(line)") }  // tool / module names, to match the profile
                 self?.pluginState[key] = line
             }
-            self?.port.sendLine(line)
+            self?.knobSendLine(line)
         }
         fromPlugin.onClose = { [weak self] in self?.pluginState = [:] }
 
@@ -202,8 +354,12 @@ final class Link {
             guard let self = self else { return }
             if !self.port.isOpen {
                 self.port.tryOpen()
-            } else if self.knobProfiles.isEmpty {
-                self.port.send(["t": "hello"])
+            }
+            if !self.port.isOpen && !self.bluetooth.isOpen {
+                self.bluetooth.tryOpen()
+            }
+            if self.knobOpen && self.knobProfiles.isEmpty {
+                self.knobSend(["t": "hello"])
             }
             self.toPlugin.tryConnect()
             self.fromPlugin.tryConnect()
@@ -240,7 +396,7 @@ final class Link {
             DispatchQueue.main.async {
                 guard let self = self, state != self.mediaState else { return }
                 self.mediaState = state
-                self.port.send(["t": "media", "state": state])
+                self.knobSend(["t": "media", "state": state])
             }
         }
     }
@@ -264,9 +420,9 @@ final class Link {
         if log {
             print("Front: \(frontApp?.localizedName ?? "?") (\(frontApp?.bundleIdentifier ?? "?")) -> \(profile)")
         }
-        guard port.isOpen, !knobProfiles.isEmpty else { return }
+        guard knobOpen, !knobProfiles.isEmpty else { return }
         if knobProfile?.caseInsensitiveCompare(profile) != .orderedSame {
-            port.send(["t": "switch", "p": profile])
+            knobSend(["t": "switch", "p": profile])
             knobProfile = profile
         }
     }
@@ -292,8 +448,8 @@ final class Link {
             update(log: false)
             // The knob may have missed what Lightroom last reported (it reboots when its
             // port opens): tell it again
-            for line in pluginState.values { port.sendLine(line) }
-            port.send(["t": "media", "state": mediaState])
+            for line in pluginState.values { knobSendLine(line) }
+            knobSend(["t": "media", "state": mediaState])
         case "where":
             knobProfile = message["p"] as? String  // also catches changes made on the knob itself
             print("Knob: \(message["p"] ?? "") / \(message["mode"] ?? "") / \(message["page"] ?? "")")

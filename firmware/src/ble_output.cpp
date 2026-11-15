@@ -8,7 +8,98 @@
 #include <KeyboardDevice.h>
 #include <MouseDevice.h>
 #include <NimBLEDevice.h>
+#include <HIDTypes.h>   // descriptor macros
 #include <stdlib.h>
+
+// ---------------- Data link (a vendor report inside the keyboard) ----------------
+// macOS hides Bluetooth keyboards from apps, so a separate data service can't be
+// reached. Keyboards may carry extra "vendor" reports though, and apps can read
+// and write those for one device. One report = 32 bytes of a text line; lines are
+// split across reports and padded with zeros.
+static const uint8_t LINK_REPORT_ID = 0x50;
+static const uint8_t LINK_REPORT_BYTES = 32;
+
+class LinkConfiguration : public BaseCompositeDeviceConfiguration {
+    public:
+        LinkConfiguration() : BaseCompositeDeviceConfiguration(LINK_REPORT_ID) {}
+        const char* getDeviceName() const override { return "Link"; }
+        uint8_t getDeviceReportSize() const override { return LINK_REPORT_BYTES; }
+        size_t makeDeviceReport(uint8_t* buffer, size_t bufferSize) const override {
+            static const uint8_t descriptor[] = {
+                USAGE_PAGE(2),      0x60, 0xFF,          // vendor page 0xFF60
+                USAGE(1),           0x61,
+                COLLECTION(1),      0x01,                // application
+                REPORT_ID(1),       LINK_REPORT_ID,
+                USAGE(1),           0x62,
+                LOGICAL_MINIMUM(1), 0x00,
+                LOGICAL_MAXIMUM(2), 0xFF, 0x00,
+                REPORT_SIZE(1),     0x08,
+                REPORT_COUNT(1),    LINK_REPORT_BYTES,
+                HIDINPUT(1),        0x02,                // knob -> Mac
+                USAGE(1),           0x63,
+                REPORT_COUNT(1),    LINK_REPORT_BYTES,
+                HIDOUTPUT(1),       0x02,                // Mac -> knob
+                END_COLLECTION(0),
+            };
+            if (bufferSize < sizeof(descriptor)) return 0;
+            memcpy(buffer, descriptor, sizeof(descriptor));
+            return sizeof(descriptor);
+        }
+};
+
+class LinkDevice : public BaseCompositeDevice, public NimBLECharacteristicCallbacks {
+    public:
+        void init(NimBLEHIDDevice* hid) override {
+            NimBLECharacteristic* input = hid->getInputReport(LINK_REPORT_ID);
+            NimBLECharacteristic* output = hid->getOutputReport(LINK_REPORT_ID);
+            output->setCallbacks(this);
+            setCharacteristics(input, output);
+            mutex_ = xSemaphoreCreateMutex();
+        }
+        const BaseCompositeDeviceConfiguration* getDeviceConfig() const override { return &config_; }
+
+        void onWrite(NimBLECharacteristic* c, NimBLEConnInfo&) override {
+            // Bytes from the Mac (another task: lock). Zeros are padding.
+            NimBLEAttValue value = c->getValue();
+            xSemaphoreTake(mutex_, portMAX_DELAY);
+            for (size_t i = 0; i < value.size(); i++) {
+                if (value[i] != 0 && incoming_.length() < 4096) incoming_ += (char)value[i];
+            }
+            xSemaphoreGive(mutex_);
+        }
+        void send(const char* line) {
+            NimBLECharacteristic* input = getInput();
+            if (input == nullptr) return;
+            String s(line);
+            s += '\n';
+            uint8_t report[LINK_REPORT_BYTES];
+            for (size_t i = 0; i < s.length(); i += LINK_REPORT_BYTES) {
+                memset(report, 0, sizeof(report));
+                size_t n = min((size_t)LINK_REPORT_BYTES, s.length() - i);
+                memcpy(report, s.c_str() + i, n);
+                input->notify(report, sizeof(report));
+                delay(2);
+            }
+        }
+        bool readLine(String& line) {
+            if (mutex_ == nullptr) return false;
+            xSemaphoreTake(mutex_, portMAX_DELAY);
+            int nl = incoming_.indexOf('\n');
+            if (nl < 0) {
+                xSemaphoreGive(mutex_);
+                return false;
+            }
+            line = incoming_.substring(0, nl);
+            incoming_.remove(0, nl + 1);
+            xSemaphoreGive(mutex_);
+            line.trim();
+            return true;
+        }
+    private:
+        LinkConfiguration config_;
+        SemaphoreHandle_t mutex_ = nullptr;
+        String incoming_;
+};
 
 // Only let paired devices connect when not pairing. If a paired Mac/iPad ever
 // can't reconnect, set this to false (or use Settings > Bluetooth > Add device).
@@ -34,9 +125,11 @@ void BleOutput::begin(const char* device_name) {
     mouse_config.setAutoReport(false);
     mouse_ = new MouseDevice(mouse_config);
 
+    link_ = new LinkDevice();
     hid_ = new BleCompositeHID(device_name, "SmartKnob", 100);
     hid_->addDevice(keyboard_);
     hid_->addDevice(mouse_);
+    hid_->addDevice(link_);
     hid_->begin();  // starts Bluetooth in the background; see update()
     begin_ms_ = millis();
 }
@@ -205,6 +298,18 @@ void BleOutput::sendKey(uint8_t modifiers, uint8_t key, int32_t times) {
         if (modifiers) keyboard_->modifierKeyRelease(modifiers);
         keyboard_->sendKeyReport();
     }
+}
+
+bool BleOutput::linkSubscribed() {
+    return link_ != nullptr && isConnected();
+}
+
+void BleOutput::linkSend(const char* line) {
+    if (link_ != nullptr) link_->send(line);
+}
+
+bool BleOutput::linkReadLine(String& line) {
+    return link_ != nullptr && link_->readLine(line);
 }
 
 void BleOutput::sendMediaKey(uint32_t media_key) {

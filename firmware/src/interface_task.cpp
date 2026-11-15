@@ -863,12 +863,17 @@ void InterfaceTask::handleLinkMessage(const char* line) {
 }
 
 void InterfaceTask::sendLink(JsonDocument& doc) {
-    // Only in plaintext mode (the binary protocol owns the line otherwise)
-    if (current_protocol_ != &plaintext_protocol_) {
-        return;
+    // Over USB (in plaintext mode; the binary protocol owns the line otherwise) and Bluetooth
+    String line;
+    serializeJson(doc, line);
+    if (current_protocol_ == &plaintext_protocol_) {
+        stream_.println(line);
     }
-    serializeJson(doc, stream_);
-    stream_.println();
+    #if SK_BLE
+        if (ble_.linkSubscribed()) {
+            ble_.linkSend(line.c_str());
+        }
+    #endif
 }
 
 void InterfaceTask::sendLinkResult(const char* error) {
@@ -1155,12 +1160,11 @@ void InterfaceTask::updateTouch() {
     // System controls live on the Function button; the touch screen belongs to the app,
     // except inside menus (no app running there)
     if (nav_screen_ != NavScreen::APP) {
-        if (gesture == TouchGesture::TAP || gesture == TouchGesture::SWIPE_LEFT) {
-            // Tap or swipe left: open / choose (forward)
-            motor_task_.playHaptic(gesture == TouchGesture::TAP);
+        if (gesture == TouchGesture::TAP) {
+            motor_task_.playHaptic(true);
             navSelect();
-        } else if (gesture == TouchGesture::SWIPE_RIGHT) {
-            // Swipe right: back
+        } else if (gesture == TouchGesture::SWIPE_RIGHT || gesture == TouchGesture::SWIPE_LEFT) {
+            // Either swipe: back
             motor_task_.playHaptic(false);
             navBack();
         }
@@ -1213,6 +1217,12 @@ bool InterfaceTask::inBleMode(int output) {
 }
 
 void InterfaceTask::updateBleOutput() {
+    // Messages from the Mac app over Bluetooth
+    String line;
+    while (ble_.linkReadLine(line)) {
+        if (line.length() > 0) handleLinkMessage(line.c_str());
+    }
+
     bool connected = ble_.isConnected();
     if (connected != ble_was_connected_) {
         ble_was_connected_ = connected;

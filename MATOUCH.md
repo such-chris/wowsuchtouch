@@ -106,8 +106,8 @@ Every gesture is printed in the monitor, e.g. `Touch: DOUBLE_TAP at (120, 98)`, 
 | Long press | in an app | next page (unless the profile uses it) |
 | Tap, triple tap, swipe left / right | in an app | set by each profile (see `profiles.cpp`) |
 | Turn the knob | in a menu | move through the list (one click per item) |
-| Tap / swipe left | in a menu | open / choose |
-| Swipe right | in a menu | back |
+| Tap | in a menu | open / choose |
+| Swipe left or right | in a menu | back |
 | Slide around the rim | anywhere | acts like turning the knob (Settings > Touch) |
 
 Single and double taps wait ~0.25 s to make sure another tap isn't coming.

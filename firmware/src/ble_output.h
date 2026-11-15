@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <WString.h>   // String
 
 // What happened to the pairing window during update()
 enum class PairingEvent { NONE, PAIRED, CLOSED };
@@ -8,6 +9,7 @@ enum class PairingEvent { NONE, PAIRED, CLOSED };
 class BleCompositeHID;
 class KeyboardDevice;
 class MouseDevice;
+class LinkDevice;
 
 // The knob as a Bluetooth keyboard + media keys + mouse wheel, all in one
 // device. Pairs with a Mac or iPad like any Bluetooth keyboard.
@@ -23,6 +25,12 @@ class BleOutput {
         // A keyboard shortcut (HID modifier bits + key code), pressed `times` times
         void sendKey(uint8_t modifiers, uint8_t key, int32_t times = 1);
         void sendMediaKey(uint32_t media_key);   // play/pause, next, previous, mute
+
+        // Data link (one JSON line per message) carried inside the keyboard as a
+        // vendor report, for the Mac app.
+        bool linkSubscribed();                   // connected (the Mac app may be listening)
+        void linkSend(const char* line);         // adds the newline, splits long lines
+        bool linkReadLine(String& line);         // a complete line from the Mac, if any
 
         // Forget every paired Mac/iPad (they'll need to pair again)
         void forgetAllDevices();
@@ -62,6 +70,7 @@ class BleOutput {
         void tapKey(uint8_t key);
 
         BleCompositeHID* hid_ = nullptr;
+        LinkDevice* link_ = nullptr;
         KeyboardDevice* keyboard_ = nullptr;
         MouseDevice* mouse_ = nullptr;
 };
