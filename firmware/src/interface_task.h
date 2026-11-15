@@ -36,6 +36,7 @@
 
 #ifdef PIN_BATTERY_ADC
 #include "battery.h"
+#include "profiles.h"
 #endif
 
 #ifndef SK_FORCE_UART_STREAM
@@ -79,7 +80,6 @@ class InterfaceTask : public Task<InterfaceTask>, public Logger {
 
         SerialProtocol* current_protocol_ = nullptr;
         bool remote_controlled_ = false;
-        int current_config_ = 0;
         uint8_t press_count_ = 1;
 
         #if SK_TOUCH
@@ -130,12 +130,22 @@ class InterfaceTask : public Task<InterfaceTask>, public Logger {
         SerialProtocolPlaintext plaintext_protocol_;
         SerialProtocolProtobuf proto_protocol_;
 
-        void changeConfig(bool next);
+        // ---- Profiles: profile > mode > module > page ----
+        std::vector<Profile> profiles_;
+        int current_mode_ = 0;
+        int current_module_ = 0;
+        int current_page_ = 0;
+        int page_serial_ = 0;      // goes up every time a page opens
+        int appCount() { return (int)profiles_.size(); }
+        const ProfilePage& currentPage();
+        void changeConfig(bool next);   // next / previous mode
+        void changeModule(bool next);   // next / previous module
+        void nextPage();
 
         // ---- Navigation: apps, the apps list and settings ----
         enum class NavScreen { APP, APPS_LIST, SETTINGS_LIST, SETTING };
         NavScreen nav_screen_ = NavScreen::APP;
-        int current_app_ = 0;      // index into apps[]
+        int current_app_ = 0;      // index into profiles_
         int open_setting_ = 0;     // which setting is open (SETTING screen)
         uint8_t nav_nonce_ = 0;    // makes the motor apply each new menu position
         int nav_list_count_ = 0;   // items in the open looping list (0 = not a looping list)

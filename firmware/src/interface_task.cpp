@@ -14,6 +14,7 @@
 #include "semaphore_guard.h"
 #include "util.h"
 #include "version.h"
+#include "profiles.h"
 
 // Icons used in pop-ups (LVGL symbols; blank if there's no screen)
 #ifndef LV_SYMBOL_BLUETOOTH
@@ -42,10 +43,6 @@ Adafruit_VEML7700 veml = Adafruit_VEML7700();
 #endif
 
 #if SK_BLE
-// What each Bluetooth mode sends when the knob's value changes.
-// These modes are the first entries in configs[] below, in this order.
-enum class KnobOutput { VOLUME, SCROLL, ARROWS };
-static const KnobOutput ble_mode_outputs[] = { KnobOutput::VOLUME, KnobOutput::SCROLL, KnobOutput::ARROWS };
 static const bool BLE_FINE_VOLUME = true;  // Shift+Option quarter steps on macOS
 
 // Spring scroll tuning (deflection is in "full deflections", i.e. 1.0 = 60 degrees)
@@ -58,270 +55,7 @@ static const float RIM_SCROLL_DEGREES = 5;       // rim travel per wheel tick in
 static const float VOLUME_RESYNC_PUSH = 0.3;
 #endif
 
-static PB_SmartKnobConfig configs[] = {
-    // int32_t position;
-    // float sub_position_unit;
-    // uint8_t position_nonce;
-    // int32_t min_position;
-    // int32_t max_position;
-    // float position_width_radians;
-    // float detent_strength_unit;
-    // float endstop_strength_unit;
-    // float snap_point;
-    // char text[51];
-    // pb_size_t detent_positions_count;
-    // int32_t detent_positions[5];
-    // float snap_point_bias;
-    // int8_t led_hue;
-
-#if SK_BLE
-    {
-        32, // starts mid-way; push into either end stop to line up with the Mac
-        0,
-        0,
-        0,
-        64, // the Mac's 64 quarter steps of volume
-        5 * PI / 180,
-        0.8,
-        1,
-        1.1,
-        "Volume",
-        0,
-        {},
-        0,
-        0,
-    },
-    {
-        // Spring-return: a single position, so any turn pushes against the end-stop
-        // force, which grows the further you turn. How far = how fast it scrolls.
-        0,
-        0,
-        0,
-        0,
-        0,
-        60 * PI / 180,  // 60 degrees of turn = "full" deflection
-        0,
-        1,              // spring strength
-        1.1,
-        "Scroll",
-        0,
-        {},
-        0,
-        0,
-    },
-    {
-        0,
-        0,
-        0,
-        0,
-        -1,
-        15 * PI / 180,
-        1,
-        1,
-        1.1,
-        "Arrows\nLeft / Right",
-        0,
-        {},
-        0,
-        0,
-    },
-#endif
-    {
-        0,
-        0,
-        0,
-        0,
-        -1, // max position < min position indicates no bounds
-        10 * PI / 180,
-        0,
-        1,
-        1.1,
-        "Unbounded\nNo detents",
-        0,
-        {},
-        0,
-        200,
-    },
-    {
-        0,
-        0,
-        1,
-        0,
-        10,
-        10 * PI / 180,
-        0,
-        1,
-        1.1,
-        "Bounded 0-10\nNo detents",
-        0,
-        {},
-        0,
-        0,
-    },
-    {
-        0,
-        0,
-        2,
-        0,
-        72,
-        10 * PI / 180,
-        0,
-        1,
-        1.1,
-        "Multi-rev\nNo detents",
-        0,
-        {},
-        0,
-        73,
-    },
-    {
-        0,
-        0,
-        3,
-        0,
-        1,
-        60 * PI / 180,
-        1,
-        1,
-        0.55, // Note the snap point is slightly past the midpoint (0.5); compare to normal detents which use a snap point *past* the next value (i.e. > 1)
-        "On/off\nStrong detent",
-        0,
-        {},
-        0,
-        157,
-    },
-    {
-        0,
-        0,
-        4,
-        0,
-        0,
-        60 * PI / 180,
-        0.01,
-        0.6,
-        1.1,
-        "Return-to-center",
-        0,
-        {},
-        0,
-        45,
-    },
-    {
-        127,
-        0,
-        5,
-        0,
-        255,
-        1 * PI / 180,
-        0,
-        1,
-        1.1,
-        "Fine values\nNo detents",
-        0,
-        {},
-        0,
-        219,
-    },
-    {
-        127,
-        0,
-        5,
-        0,
-        255,
-        1 * PI / 180,
-        1,
-        1,
-        1.1,
-        "Fine values\nWith detents",
-        0,
-        {},
-        0,
-        25,
-    },
-    {
-        0,
-        0,
-        6,
-        0,
-        31,
-        8.225806452 * PI / 180,
-        2,
-        1,
-        1.1,
-        "Coarse values\nStrong detents",
-        0,
-        {},
-        0,
-        200,
-    },
-    {
-        0,
-        0,
-        6,
-        0,
-        31,
-        8.225806452 * PI / 180,
-        0.2,
-        1,
-        1.1,
-        "Coarse values\nWeak detents",
-        0,
-        {},
-        0,
-        0,
-    },
-    {
-        0,
-        0,
-        7,
-        0,
-        31,
-        7 * PI / 180,
-        2.5,
-        1,
-        0.7,
-        "Magnetic detents",
-        4,
-        {2, 10, 21, 22},
-        0,
-        73,
-    },
-    {
-        0,
-        0,
-        8,
-        -6,
-        6,
-        60 * PI / 180,
-        1,
-        1,
-        0.55,
-        "Return-to-center\nwith detents",
-        0,
-        {},
-        0.4,
-        157,
-    },
-};
-
-// ---- Apps: each app is a group of modes (pages) from configs[] above ----
-struct AppDef {
-    const char* name;
-    int first_config;   // index of its first page in configs[]
-    int config_count;   // how many pages
-};
-#if SK_BLE
-static const int MAC_PAGE_COUNT = COUNT_OF(ble_mode_outputs);
-static const AppDef apps[] = {
-    {"Mac", 0, MAC_PAGE_COUNT},                                      // Volume, Scroll, Arrows
-    {"Demo", MAC_PAGE_COUNT, (int)COUNT_OF(configs) - MAC_PAGE_COUNT},  // Scott's haptic demos
-};
-#else
-static const AppDef apps[] = {
-    {"Demo", 0, (int)COUNT_OF(configs)},
-};
-#endif
-static const int APP_COUNT = COUNT_OF(apps);
+// Apps are profiles now: see profiles.cpp
 
 // ---- Settings list ----
 enum SettingItem {
@@ -469,6 +203,26 @@ void InterfaceTask::run() {
         }
     #endif
 
+    // Built-in profiles (the apps in the menu)
+    loadBuiltinProfiles(profiles_, [this] (const char* msg) { log(msg); });
+    snprintf(buf_, sizeof(buf_), "Profiles: %d loaded", (int)profiles_.size());
+    log(buf_);
+    if (profiles_.empty()) {
+        // Never leave the knob with nothing to open
+        log("No profiles loaded: using a plain knob");
+        Profile plain;
+        plain.name = "Knob";
+        ProfilePage page;
+        page.label = "Knob";
+        page.feel.max_position = -1;
+        page.feel.position_width_radians = 10 * PI / 180;
+        page.feel.endstop_strength_unit = 1;
+        page.feel.snap_point = 1.1;
+        strncpy(page.feel.text, "Knob", sizeof(page.feel.text) - 1);
+        plain.modes.push_back(ProfileMode{"Knob", {ProfileModule{"Knob", {page}}}});
+        profiles_.push_back(plain);
+    }
+
     // Restore saved settings and open the last-used app
     settings_ = settings_store_.load();
     applySettings();
@@ -480,7 +234,7 @@ void InterfaceTask::run() {
         motor_task_.setRelaxed(true);
         showChargingScreen();
     } else {
-        openApp(settings_.app < APP_COUNT ? settings_.app : 0);
+        openApp(settings_.app < appCount() ? settings_.app : 0);
     }
     sendStatus();
     motor_task_.addListener(knob_state_queue_);
@@ -613,15 +367,46 @@ void InterfaceTask::log(const char* msg) {
     xQueueSendToBack(log_queue_, &msg_str, 0);
 }
 
+static int wrapIndex(int i, int count) {
+    return count > 0 ? ((i % count) + count) % count : 0;
+}
+
+const ProfilePage& InterfaceTask::currentPage() {
+    const Profile& profile = profiles_[current_app_];
+    const ProfileMode& mode = profile.modes[current_mode_];
+    const ProfileModule& module = mode.modules[current_module_];
+    return module.pages[current_page_];
+}
+
 void InterfaceTask::changeConfig(bool next) {
-    // Next / previous page within the current app (wraps around)
+    // Next / previous mode in the current profile (swipe left / right; wraps around)
     if (nav_screen_ != NavScreen::APP) {
         return;
     }
-    const AppDef& app = apps[current_app_];
-    int page = current_config_ - app.first_config;
-    page = (page + (next ? 1 : -1) + app.config_count) % app.config_count;
-    current_config_ = app.first_config + page;
+    current_mode_ = wrapIndex(current_mode_ + (next ? 1 : -1), profiles_[current_app_].modes.size());
+    current_module_ = 0;
+    current_page_ = 0;
+    applyAppPage();
+}
+
+void InterfaceTask::changeModule(bool next) {
+    // Next / previous module in the current mode (swipe up / down; wraps around)
+    const ProfileMode& mode = profiles_[current_app_].modes[current_mode_];
+    if (nav_screen_ != NavScreen::APP || mode.modules.size() < 2) {
+        return;
+    }
+    current_module_ = wrapIndex(current_module_ + (next ? 1 : -1), mode.modules.size());
+    current_page_ = 0;
+    applyAppPage();
+}
+
+void InterfaceTask::nextPage() {
+    // Next page in the current module (long press; wraps around)
+    const ProfileModule& module = profiles_[current_app_].modes[current_mode_].modules[current_module_];
+    if (nav_screen_ != NavScreen::APP || module.pages.size() < 2) {
+        return;
+    }
+    current_page_ = wrapIndex(current_page_ + 1, module.pages.size());
     applyAppPage();
 }
 
@@ -812,7 +597,7 @@ void InterfaceTask::updateTouch() {
 
         if (ring_is_slide_) {
             #if SK_BLE
-            if (inBleMode((int)KnobOutput::SCROLL)) {
+            if (inBleMode((int)TurnOutput::SCROLL)) {
                 // Scroll mode has no value to step: the rim scrolls directly
                 ring_scroll_accum_degrees_ += feed_degrees;
                 int32_t ticks = (int32_t)(ring_scroll_accum_degrees_ / RIM_SCROLL_DEGREES);
@@ -877,8 +662,8 @@ void InterfaceTask::updateTouch() {
         return;
     }
 
-    // In an app: swipe left / right = next / previous page.
-    // Tap, double tap, triple tap, long press and swipes up / down are free for app actions.
+    // In an app: swipe left / right = mode, swipe up / down = module, long press = page.
+    // Tap, double tap and triple tap are free for app actions (tap = knob push).
     switch (gesture) {
         case TouchGesture::SWIPE_LEFT:
             motor_task_.playHaptic(false);
@@ -887,6 +672,18 @@ void InterfaceTask::updateTouch() {
         case TouchGesture::SWIPE_RIGHT:
             motor_task_.playHaptic(false);
             changeConfig(false);
+            break;
+        case TouchGesture::SWIPE_UP:
+            motor_task_.playHaptic(false);
+            changeModule(true);
+            break;
+        case TouchGesture::SWIPE_DOWN:
+            motor_task_.playHaptic(false);
+            changeModule(false);
+            break;
+        case TouchGesture::LONG_PRESS:
+            motor_task_.playHaptic(true);
+            nextPage();
             break;
         default:
             // Triple tap, and swipes up/down away from the edges: free for app-specific actions
@@ -899,8 +696,7 @@ void InterfaceTask::updateTouch() {
 bool InterfaceTask::inBleMode(int output) {
     return !remote_controlled_
         && nav_screen_ == NavScreen::APP
-        && current_config_ < (int)COUNT_OF(ble_mode_outputs)
-        && (int)ble_mode_outputs[current_config_] == output;
+        && (int)currentPage().turn == output;
 }
 
 void InterfaceTask::updateBleOutput() {
@@ -920,8 +716,8 @@ void InterfaceTask::updateBleOutput() {
     }
 
     int32_t position = latest_state_.current_position;
-    if (current_config_ != ble_last_config_) {
-        ble_last_config_ = current_config_;
+    if (page_serial_ != ble_last_config_) {
+        ble_last_config_ = page_serial_;
         ble_last_position_ = position;
         ble_scroll_accum_ = 0;
         ble_scroll_last_ms_ = millis();
@@ -932,7 +728,7 @@ void InterfaceTask::updateBleOutput() {
     int32_t steps = position - ble_last_position_;
     ble_last_position_ = position;
 
-    if (inBleMode((int)KnobOutput::VOLUME)) {
+    if (inBleMode((int)TurnOutput::VOLUME)) {
         if (steps != 0) {
             ble_.volumeSteps(steps, BLE_FINE_VOLUME);
         }
@@ -950,7 +746,7 @@ void InterfaceTask::updateBleOutput() {
         } else if (fabsf(push) < 0.1f) {
             ble_volume_resynced_ = false;
         }
-    } else if (inBleMode((int)KnobOutput::SCROLL)) {
+    } else if (inBleMode((int)TurnOutput::SCROLL)) {
         // Spring scroll: speed comes from how far the knob is held off center
         uint32_t now = millis();
         float dt = (now - ble_scroll_last_ms_) / 1000.0f;
@@ -971,7 +767,7 @@ void InterfaceTask::updateBleOutput() {
             ble_.scrollSteps(ticks);
             ble_scroll_accum_ -= ticks;
         }
-    } else if (inBleMode((int)KnobOutput::ARROWS)) {
+    } else if (inBleMode((int)TurnOutput::ARROWS)) {
         if (steps != 0) {
             ble_.arrowSteps(steps);
         }
@@ -1151,33 +947,37 @@ void InterfaceTask::goHome() {
 }
 
 void InterfaceTask::openApp(int app) {
-    current_app_ = CLAMP(app, 0, APP_COUNT - 1);
+    app = CLAMP(app, 0, appCount() - 1);
+    if (app != current_app_) {
+        // A different profile starts at its first mode; returning to the same one keeps your place
+        current_mode_ = current_module_ = current_page_ = 0;
+    }
+    current_app_ = app;
     settings_.app = current_app_;
     setNavScreen(NavScreen::APP);
-    const AppDef& def = apps[current_app_];
-    if (current_config_ < def.first_config || current_config_ >= def.first_config + def.config_count) {
-        current_config_ = def.first_config;
-    }
     applyAppPage();
 }
 
 void InterfaceTask::applyAppPage() {
     UiScreen ui;
     ui.layout = UiLayout::CONTROL;
-    copyText(ui.title, apps[current_app_].name);
+    copyText(ui.title, profiles_[current_app_].name.c_str());
     showUi(ui);
 
+    const ProfilePage& page = currentPage();
+    PB_SmartKnobConfig config = page.feel;
     #if SK_BLE
         // Volume picks up where it was last left
-        if (current_config_ < (int)COUNT_OF(ble_mode_outputs) && ble_mode_outputs[current_config_] == KnobOutput::VOLUME) {
-            configs[current_config_].position = ble_volume_level_;
+        if (page.turn == TurnOutput::VOLUME) {
+            config.position = ble_volume_level_;
         }
     #endif
-    configs[current_config_].position_nonce = ++nav_nonce_;
+    config.position_nonce = ++nav_nonce_;
+    page_serial_++;
 
-    snprintf(buf_, sizeof(buf_), "%s: %s", apps[current_app_].name, configs[current_config_].text);
+    snprintf(buf_, sizeof(buf_), "%s: %s", profiles_[current_app_].name.c_str(), config.text);
     log(buf_);
-    applyConfig(configs[current_config_], false);
+    applyConfig(config, false);
 }
 
 // Main menu: the apps, then Settings, Sleep and Power off
@@ -1188,15 +988,15 @@ void InterfaceTask::openAppsList(int selected) {
     copyText(ui.title, "Menu");
     ui.ring_at_bottom = true;
     ui.show_status = true;
-    ui.item_count = APP_COUNT + MENU_EXTRA_COUNT;
-    for (int i = 0; i < APP_COUNT; i++) {
-        copyText(ui.items[i], apps[i].name);
+    ui.item_count = appCount() + MENU_EXTRA_COUNT;
+    for (int i = 0; i < appCount(); i++) {
+        copyText(ui.items[i], profiles_[i].name.c_str());
     }
     for (int i = 0; i < MENU_EXTRA_COUNT; i++) {
-        copyText(ui.items[APP_COUNT + i], menu_extra_names[i]);
+        copyText(ui.items[appCount() + i], menu_extra_names[i]);
     }
     showUi(ui);
-    PB_SmartKnobConfig config = makeListConfig("Menu", APP_COUNT + MENU_EXTRA_COUNT, selected, ++nav_nonce_);
+    PB_SmartKnobConfig config = makeListConfig("Menu", appCount() + MENU_EXTRA_COUNT, selected, ++nav_nonce_);
     applyConfig(config, false);
 }
 
@@ -1310,11 +1110,11 @@ void InterfaceTask::navSelect() {
     int32_t sel = selectedIndex();
     switch (nav_screen_) {
         case NavScreen::APPS_LIST:
-            if (sel < APP_COUNT) {
+            if (sel < appCount()) {
                 openApp(sel);
-            } else if (sel == APP_COUNT + MENU_SETTINGS) {
+            } else if (sel == appCount() + MENU_SETTINGS) {
                 openSettingsList(0);
-            } else if (sel == APP_COUNT + MENU_SLEEP) {
+            } else if (sel == appCount() + MENU_SLEEP) {
                 // Screen off; any touch, turn or button press wakes it
                 log("Sleep: screen off (from the menu)");
                 last_activity_ms_ = millis() - SLEEP_SCREEN_OFF_MS;
@@ -1389,7 +1189,7 @@ void InterfaceTask::navBack() {
             }
             break;
         case NavScreen::SETTINGS_LIST:
-            openAppsList(APP_COUNT + MENU_SETTINGS);  // back to the main menu, on Settings
+            openAppsList(appCount() + MENU_SETTINGS);  // back to the main menu, on Settings
             break;
         case NavScreen::APPS_LIST:
             openApp(current_app_);
@@ -1582,6 +1382,6 @@ void InterfaceTask::leaveChargingMode() {
         ble_.begin("SmartKnob");
     #endif
     noteActivity();
-    openApp(settings_.app < APP_COUNT ? settings_.app : 0);
+    openApp(settings_.app < appCount() ? settings_.app : 0);
     sendStatus();
 }
