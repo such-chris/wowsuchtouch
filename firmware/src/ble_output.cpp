@@ -17,7 +17,14 @@
 // and write those for one device. One report = 32 bytes of a text line; lines are
 // split across reports and padded with zeros.
 static const uint8_t LINK_REPORT_ID = 0x50;
-static const uint8_t LINK_REPORT_BYTES = 32;
+// Knob -> Mac goes through a FEATURE report that the Mac polls. macOS delivers
+// notifications of vendor input reports ~200 ms late and answers input-report reads
+// from its own cache, but a feature report is fetched live from the device every
+// time (~30 ms). Each read hands over the next queued chunk: 1 sequence byte + text
+// (sequence 0 = nothing waiting). The input report is still notified, as a nudge
+// that something is waiting.
+static const uint8_t LINK_REPORT_BYTES = 60;
+static const uint8_t LINK_CHUNK_BYTES = LINK_REPORT_BYTES - 1;
 
 class LinkConfiguration : public BaseCompositeDeviceConfiguration {
     public:
@@ -35,10 +42,13 @@ class LinkConfiguration : public BaseCompositeDeviceConfiguration {
                 LOGICAL_MAXIMUM(2), 0xFF, 0x00,
                 REPORT_SIZE(1),     0x08,
                 REPORT_COUNT(1),    LINK_REPORT_BYTES,
-                HIDINPUT(1),        0x02,                // knob -> Mac
+                HIDINPUT(1),        0x02,                // knob -> Mac nudge
                 USAGE(1),           0x63,
                 REPORT_COUNT(1),    LINK_REPORT_BYTES,
                 HIDOUTPUT(1),       0x02,                // Mac -> knob
+                USAGE(1),           0x64,
+                REPORT_COUNT(1),    LINK_REPORT_BYTES,
+                FEATURE(1),         0x02,                // knob -> Mac data, read by the Mac
                 END_COLLECTION(0),
             };
             if (bufferSize < sizeof(descriptor)) return 0;
@@ -52,12 +62,31 @@ class LinkDevice : public BaseCompositeDevice, public NimBLECharacteristicCallba
         void init(NimBLEHIDDevice* hid) override {
             NimBLECharacteristic* input = hid->getInputReport(LINK_REPORT_ID);
             NimBLECharacteristic* output = hid->getOutputReport(LINK_REPORT_ID);
+            feature_ = hid->getFeatureReport(LINK_REPORT_ID);
             output->setCallbacks(this);
+            feature_->setCallbacks(this);
             setCharacteristics(input, output);
             mutex_ = xSemaphoreCreateMutex();
+            uint8_t empty[LINK_REPORT_BYTES] = {};
+            feature_->setValue(empty, sizeof(empty));
         }
         const BaseCompositeDeviceConfiguration* getDeviceConfig() const override { return &config_; }
 
+        // The Mac reads the feature report: hand it the next queued chunk (or nothing)
+        void onRead(NimBLECharacteristic* c, NimBLEConnInfo&) override {
+            if (c != feature_) return;
+            uint8_t report[LINK_REPORT_BYTES] = {};
+            xSemaphoreTake(mutex_, portMAX_DELAY);
+            if (outgoing_.length() > 0) {
+                report[0] = ++seq_;
+                if (seq_ == 0) report[0] = ++seq_;
+                size_t n = min((size_t)LINK_CHUNK_BYTES, (size_t)outgoing_.length());
+                memcpy(report + 1, outgoing_.c_str(), n);
+                outgoing_.remove(0, n);
+            }
+            xSemaphoreGive(mutex_);
+            c->setValue(report, sizeof(report));
+        }
         void onWrite(NimBLECharacteristic* c, NimBLEConnInfo&) override {
             // Bytes from the Mac (another task: lock). Zeros are padding.
             NimBLEAttValue value = c->getValue();
@@ -65,21 +94,25 @@ class LinkDevice : public BaseCompositeDevice, public NimBLECharacteristicCallba
             for (size_t i = 0; i < value.size(); i++) {
                 if (value[i] != 0 && incoming_.length() < 4096) incoming_ += (char)value[i];
             }
+            last_write_ms_ = millis();
             xSemaphoreGive(mutex_);
         }
         void send(const char* line) {
             NimBLECharacteristic* input = getInput();
             if (input == nullptr) return;
-            String s(line);
-            s += '\n';
-            uint8_t report[LINK_REPORT_BYTES];
-            for (size_t i = 0; i < s.length(); i += LINK_REPORT_BYTES) {
-                memset(report, 0, sizeof(report));
-                size_t n = min((size_t)LINK_REPORT_BYTES, s.length() - i);
-                memcpy(report, s.c_str() + i, n);
-                input->notify(report, sizeof(report));
-                delay(2);
+            uint32_t started = millis();
+            xSemaphoreTake(mutex_, portMAX_DELAY);
+            if (outgoing_.length() < 4096) {
+                outgoing_ += line;
+                outgoing_ += '\n';
             }
+            xSemaphoreGive(mutex_);
+            // Nudge: a notification (slow on macOS, but it tells the Mac to start polling)
+            uint8_t nudge[LINK_REPORT_BYTES] = {};
+            nudge[0] = 1;
+            last_send_ok_ = input->notify(nudge, sizeof(nudge));
+            last_send_reports_ = 1;
+            last_send_ms_ = millis() - started;
         }
         bool readLine(String& line) {
             if (mutex_ == nullptr) return false;
@@ -95,10 +128,21 @@ class LinkDevice : public BaseCompositeDevice, public NimBLECharacteristicCallba
             line.trim();
             return true;
         }
+        uint32_t lastWriteMs() const { return last_write_ms_; }
+        uint32_t lastSendMs() const { return last_send_ms_; }        // how long the last send() took
+        uint8_t lastSendReports() const { return last_send_reports_; }
+        bool lastSendOk() const { return last_send_ok_; }
     private:
         LinkConfiguration config_;
         SemaphoreHandle_t mutex_ = nullptr;
         String incoming_;
+        volatile uint32_t last_write_ms_ = 0;
+        uint32_t last_send_ms_ = 0;
+        uint8_t seq_ = 0;
+        NimBLECharacteristic* feature_ = nullptr;
+        String outgoing_;   // text waiting for the Mac to read
+        uint8_t last_send_reports_ = 0;
+        bool last_send_ok_ = true;
 };
 
 // Only let paired devices connect when not pairing. If a paired Mac/iPad ever
@@ -130,7 +174,15 @@ void BleOutput::begin(const char* device_name) {
     hid_->addDevice(keyboard_);
     hid_->addDevice(mouse_);
     hid_->addDevice(link_);
-    hid_->begin();  // starts Bluetooth in the background; see update()
+    // Connection rhythm. Apple only honours requests of 15 ms or more (the library's
+    // default of 7.5 ms gets ignored, and the Mac then drifts to a slow, power-saving
+    // rhythm with 200 ms+ round trips). 15-30 ms, no skipped slots, 4 s timeout.
+    BLEHostConfiguration host;
+    host.setMinConnectionInterval(12);   // units of 1.25 ms
+    host.setMaxConnectionInterval(24);
+    host.setSlaveLatency(0);
+    host.setSupervisionTimeout(400);     // units of 10 ms
+    hid_->begin(host);  // starts Bluetooth in the background; see update()
     begin_ms_ = millis();
 }
 
@@ -147,12 +199,16 @@ void BleOutput::applyAdvertising() {
         NimBLEDevice::whiteListAdd(NimBLEDevice::getBondedAddress(i));
     }
 
-    // Restart the "I'm here" signal with the new rule
+    // Restart the "I'm here" signal with the new rule. Not while connected: advertising
+    // beside a connection competes with it for radio time (the library advertises
+    // again by itself on disconnect).
     bool paired_only = PAIRED_ONLY && !pairing_ && bonds > 0;
     NimBLEAdvertising* advertising = NimBLEDevice::getAdvertising();
     advertising->stop();
     advertising->setScanFilter(false, paired_only);
-    advertising->start();
+    if (!isConnected()) {
+        advertising->start();
+    }
 }
 
 void BleOutput::openPairing(uint32_t duration_ms) {
@@ -229,6 +285,18 @@ PairingEvent BleOutput::update(uint32_t now_ms) {
         }
     }
 
+    // Re-ask for the quick rhythm now and then: the Mac may relax it on its own
+    if (isConnected() && now_ms - last_conn_params_ms_ > 5000) {
+        last_conn_params_ms_ = now_ms;
+        NimBLEServer* server = NimBLEDevice::getServer();
+        if (server != nullptr && server->getConnectedCount() > 0) {
+            NimBLEConnInfo info = server->getPeerInfo(0);
+            if (info.getConnInterval() > 24 || info.getConnLatency() > 0) {
+                server->updateConnParams(info.getConnHandle(), 12, 24, 0, 400);
+            }
+        }
+    }
+
     if (pairing_) {
         bool new_device = NimBLEDevice::getNumBonds() > bonds_at_open_;
         bool timed_out = pairing_end_ms_ != 0 && (int32_t)(now_ms - pairing_end_ms_) >= 0;
@@ -298,6 +366,25 @@ void BleOutput::sendKey(uint8_t modifiers, uint8_t key, int32_t times) {
         if (modifiers) keyboard_->modifierKeyRelease(modifiers);
         keyboard_->sendKeyReport();
     }
+}
+
+bool BleOutput::connParams(uint16_t& interval, uint16_t& latency) {
+    NimBLEServer* server = ready_ ? NimBLEDevice::getServer() : nullptr;
+    if (server == nullptr || server->getConnectedCount() == 0) return false;
+    NimBLEConnInfo info = server->getPeerInfo(0);
+    interval = info.getConnInterval();
+    latency = info.getConnLatency();
+    return true;
+}
+
+void BleOutput::linkSendStats(uint32_t& ms, uint8_t& reports, bool& ok) {
+    ms = link_ ? link_->lastSendMs() : 0;
+    reports = link_ ? link_->lastSendReports() : 0;
+    ok = link_ ? link_->lastSendOk() : false;
+}
+
+uint32_t BleOutput::linkLastWriteMs() {
+    return link_ != nullptr ? link_->lastWriteMs() : 0;
 }
 
 bool BleOutput::linkSubscribed() {

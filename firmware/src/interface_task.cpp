@@ -361,6 +361,7 @@ void InterfaceTask::run() {
 
         updateUsbPower();
         updateSleep();
+        checkPageTimeout();
 
         #ifdef PIN_BATTERY_ADC
             updateBattery();
@@ -441,6 +442,21 @@ const std::vector<PickOption>& InterfaceTask::edgeButtons() {
     return profiles_[current_app_].modes[current_mode_].modules[current_module_].buttons;
 }
 
+// Pages with a timeout (zoom, color, rating) go back to browsing when left alone
+void InterfaceTask::checkPageTimeout() {
+    if (nav_screen_ != NavScreen::APP) {
+        return;
+    }
+    const ProfilePage& page = currentPage();
+    if (page.timeout_s == 0) {
+        return;
+    }
+    uint32_t since = millis() - max(page_opened_ms_, last_activity_ms_);
+    if (since > page.timeout_s * 1000UL) {
+        openPage(viewPage(false));
+    }
+}
+
 void InterfaceTask::openPage(int page) {
     const ProfileModule& module = profiles_[current_app_].modes[current_mode_].modules[current_module_];
     current_page_ = CLAMP(page, 0, (int)module.pages.size() - 1);
@@ -495,6 +511,7 @@ bool InterfaceTask::runAction(const Action& action, ActionKind fallback, bool st
         case ActionKind::PREV_MODE:   changeConfig(false); break;
         case ActionKind::MODULE:      openModuleNamed(action.name.c_str()); break;
         case ActionKind::VIEW:        openPage(viewPage(true)); break;
+        case ActionKind::BACK:        openPage(viewPage(false)); break;
         case ActionKind::PAGE: {
             // "A|B": pick by which view we're in (first view page = A)
             String name = action.name;
@@ -529,13 +546,44 @@ bool InterfaceTask::runAction(const Action& action, ActionKind fallback, bool st
 void InterfaceTask::sendLinkTurn(int32_t steps) {
     const ProfilePage& page = currentPage();
     JsonDocument doc;
-    doc["t"] = "turn";
-    doc["param"] = page.param;
-    doc["d"] = steps;
-    if (page.step > 0) {
-        doc["step"] = page.step;
+    if (steps == 0) {
+        // Opening a slider: the full message names it and asks for its value and range
+        doc["t"] = "turn";
+        doc["param"] = page.param;
+        doc["d"] = 0;
+        if (page.step > 0) {
+            doc["step"] = page.step;
+        }
+    } else {
+        // Every click after that: as short as possible (one radio report), numbered
+        doc["t"] = "n";
+        doc["d"] = steps;
+        doc["s"] = ++link_seq_;
+        last_turn_ms_ = millis();
+        showLinkEstimate();
     }
     sendLink(doc);
+}
+
+// Show where the slider should be after our turn, without waiting for Lightroom
+void InterfaceTask::showLinkEstimate() {
+    #if SK_DISPLAY
+        const PB_SmartKnobConfig& feel = currentPage().feel;
+        if (link_high_ <= link_low_ || feel.max_position <= feel.min_position) {
+            return;
+        }
+        float value = link_low_ + (latest_state_.current_position - feel.min_position)
+            * (link_high_ - link_low_) / (feel.max_position - feel.min_position);
+        display_task_->showValueText(formatLinkValue(value).c_str());
+    #endif
+}
+
+String InterfaceTask::formatLinkValue(float value) {
+    char text[16];
+    if (link_format_ == "%+.2f") snprintf(text, sizeof(text), "%+.2f", value);
+    else if (link_format_ == "%+d") snprintf(text, sizeof(text), "%+d", (int)lroundf(value));
+    else snprintf(text, sizeof(text), "%d", (int)lroundf(value));
+    return String(text);
 }
 
 void InterfaceTask::openMode(int mode, int module) {
@@ -835,15 +883,49 @@ void InterfaceTask::handleLinkMessage(const char* line) {
         sendLinkResult(nullptr);
     } else if (strcmp(type, "val") == 0) {
         // A value to show, e.g. Lightroom's Exposure "+0.35"
+        // Full form (on opening a slider): param, v, lo, hi, fmt. Short form while
+        // turning: v and s (the click it answers), for the slider the knob is on.
         const char* param = doc["param"] | "";
-        if (nav_screen_ == NavScreen::APP && currentPage().param.equals(param)) {
-            #if SK_DISPLAY
-                display_task_->showValueText(doc["txt"] | "");
-            #endif
+        bool mine = nav_screen_ == NavScreen::APP && currentPage().turn == TurnOutput::LINK
+            && (param[0] == 0 || currentPage().param.equals(param));
+        if (mine) {
             if (doc["lo"].is<float>() && doc["hi"].is<float>()) {
-                syncLinkValue(doc["v"] | 0.0f, doc["lo"] | 0.0f, doc["hi"] | 0.0f);
+                link_low_ = doc["lo"] | 0.0f;
+                link_high_ = doc["hi"] | 0.0f;
+                link_format_ = doc["fmt"] | "%d";
+                link_seq_ = 0;
+            }
+            // A reply to an older click (we've turned since) is stale: the knob already
+            // knows better. Only the answer to the latest click, with the knob at rest,
+            // may move the knob.
+            uint32_t seq = doc["s"] | 0;
+            bool current = seq == link_seq_ && millis() - last_turn_ms_ > 150;
+            if (doc["v"].is<float>() && current) {
+                float value = doc["v"] | 0.0f;
+                #if SK_DISPLAY
+                    display_task_->showValueText(formatLinkValue(value).c_str());
+                #endif
+                syncLinkValue(value, link_low_, link_high_);
             }
         }
+    } else if (strcmp(type, "ping") == 0) {
+        JsonDocument reply;
+        reply["t"] = "pong";
+        reply["s"] = doc["s"] | 0;
+        #if SK_BLE
+            uint16_t interval, latency;
+            if (ble_.connParams(interval, latency)) {
+                reply["itvl"] = interval;   // x 1.25 ms
+                reply["lat"] = latency;
+                reply["held"] = millis() - ble_.linkLastWriteMs();   // ms the knob sat on the ping
+                uint32_t send_ms; uint8_t reports; bool ok;
+                ble_.linkSendStats(send_ms, reports, ok);
+                reply["prev"] = send_ms;      // how long the previous send took
+                reply["rep"] = reports;
+                reply["ok"] = ok;
+            }
+        #endif
+        sendLink(reply);
     } else if (strcmp(type, "media") == 0) {
         media_state_ = doc["state"] | "";
         showMediaState();
@@ -1600,11 +1682,13 @@ void InterfaceTask::applyAppPage() {
 
     snprintf(buf_, sizeof(buf_), "%s: %s", profiles_[current_app_].name.c_str(), config.text);
     log(buf_);
+    page_opened_ms_ = millis();
     applyConfig(config, false);
     sendWhere();
     showMediaState();
     if (page.turn == TurnOutput::LINK) {
-        sendLinkTurn(0);  // "turned 0" = just tell me the current value
+        link_low_ = link_high_ = 0;
+        sendLinkTurn(0);  // "turned 0" = just tell me the current value and range
     }
 }
 

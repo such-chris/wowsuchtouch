@@ -173,17 +173,24 @@ final class SocketChannel: LineChannel {
 let LINK_USAGE_PAGE = 0xFF60
 let LINK_USAGE = 0x61
 let LINK_REPORT_ID: UInt8 = 0x50
-let LINK_REPORT_BYTES = 32
+let LINK_REPORT_BYTES = 60          // 1 sequence byte + 59 bytes of text
+let LINK_WRITE_BYTES = 20           // Mac -> knob writes stay small (one radio packet)
 
 final class KnobBluetooth {
     private var manager: IOHIDManager
     private var device: IOHIDDevice?
     private var reportBuffer = [UInt8](repeating: 0, count: 64)
     private var buffer = Data()
+    private var lastSeq: UInt8 = 0
+    private var outOfOrder: [UInt8: [UInt8]] = [:]
+    private var lastMessageAt = Date.distantPast
+    private var polling = false
     var onLine: ((String) -> Void)?
     var onConnect: (() -> Void)?
     var onDisconnect: (() -> Void)?
     var isOpen: Bool { return device != nil }
+    private let writer = DispatchQueue(label: "knob-writes")   // writes and reads wait for the knob; keep that off the main thread
+    private let reader = DispatchQueue(label: "knob-reads")
 
     init() {
         manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
@@ -204,26 +211,7 @@ final class KnobBluetooth {
         }
     }
 
-    private var listed = false
-    func tryOpen() {
-        // One-time listing of every HID device called SmartKnob, so we can see what the
-        // Mac thinks the knob offers
-        guard !listed else { return }
-        listed = true
-        let all = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
-        IOHIDManagerSetDeviceMatching(all, nil)
-        let devices = (IOHIDManagerCopyDevices(all) as? Set<IOHIDDevice>) ?? []
-        var lines: [String] = []
-        for dev in devices {
-            let name = IOHIDDeviceGetProperty(dev, kIOHIDProductKey as CFString) as? String ?? "?"
-            guard name.localizedCaseInsensitiveContains("knob") else { continue }
-            let page = IOHIDDeviceGetProperty(dev, kIOHIDPrimaryUsagePageKey as CFString) as? Int ?? 0
-            let usage = IOHIDDeviceGetProperty(dev, kIOHIDPrimaryUsageKey as CFString) as? Int ?? 0
-            let transport = IOHIDDeviceGetProperty(dev, kIOHIDTransportKey as CFString) as? String ?? "?"
-            lines.append("\(name) [\(transport)] page 0x\(String(page, radix: 16)) usage 0x\(String(usage, radix: 16))")
-        }
-        print("HID: knob devices seen: \(lines.isEmpty ? "none" : lines.joined(separator: "; "))")
-    }
+    func tryOpen() {}   // the HID system calls attached() by itself
 
     private func attached(_ dev: IOHIDDevice) {
         guard device == nil else { return }
@@ -233,6 +221,8 @@ final class KnobBluetooth {
         }
         device = dev
         buffer.removeAll()
+        lastSeq = 0
+        outOfOrder = [:]
         let context = Unmanaged.passUnretained(self).toOpaque()
         reportBuffer.withUnsafeMutableBufferPointer { buf in
             IOHIDDeviceRegisterInputReportCallback(dev, buf.baseAddress!, buf.count, { context, _, _, _, reportID, report, length in
@@ -241,6 +231,7 @@ final class KnobBluetooth {
         }
         print("Knob (Bluetooth): connected")
         onConnect?()
+        startPolling()
     }
 
     private func removed(_ dev: IOHIDDevice) {
@@ -251,11 +242,50 @@ final class KnobBluetooth {
         onDisconnect?()
     }
 
+    // Notifications arrive ~200 ms late on macOS and input-report reads come from a
+    // cache, but a FEATURE report is fetched live from the knob (~30 ms). So we poll
+    // it: back to back while messages are flowing, every 150 ms when idle. A
+    // notification (the knob's nudge) switches us to fast polling.
+    private func startPolling() {
+        guard !polling else { return }
+        polling = true
+        reader.async { [weak self] in self?.pollLoop() }
+    }
+
+    private func pollLoop() {
+        while let device = device {
+            var buf = [UInt8](repeating: 0, count: 64)
+            var length = CFIndex(buf.count)
+            let result = IOHIDDeviceGetReport(device, kIOHIDReportTypeFeature, CFIndex(LINK_REPORT_ID), &buf, &length)
+            if result == kIOReturnSuccess {
+                let bytes = Array(buf[0..<Int(length)])
+                DispatchQueue.main.sync { self.take(bytes) }
+            }
+            let busy = Date().timeIntervalSince(lastMessageAt) < 2
+            if !busy { Thread.sleep(forTimeInterval: 0.15) }
+        }
+        polling = false
+    }
+
     private func gotReport(_ reportID: UInt32, _ report: UnsafeMutablePointer<UInt8>, _ length: Int) {
         guard reportID == UInt32(LINK_REPORT_ID) else { return }
-        var bytes = Array(UnsafeBufferPointer(start: report, count: length))
+        lastMessageAt = Date()   // the knob's nudge: something is waiting, poll quickly
+    }
+
+    // A report, by either route: [sequence][text...]. New ones (in order) feed the line buffer.
+    private func take(_ raw: [UInt8]) {
+        var bytes = raw
         if bytes.first == LINK_REPORT_ID && bytes.count > LINK_REPORT_BYTES { bytes.removeFirst() }
-        buffer.append(contentsOf: bytes.filter { $0 != 0 })   // zeros are padding
+        guard bytes.count >= 2, bytes[0] != 0 else { return }   // 0 = nothing waiting
+        let seq = bytes[0]
+        if seq == lastSeq { return }                       // already seen
+        accept(seq, bytes)
+    }
+
+    private func accept(_ seq: UInt8, _ bytes: [UInt8]) {
+        lastSeq = seq
+        lastMessageAt = Date()
+        buffer.append(contentsOf: bytes[1...].filter { $0 != 0 })   // zeros are padding
         while let newline = buffer.firstIndex(of: 10) {
             let lineData = buffer.subdata(in: buffer.startIndex..<newline)
             buffer.removeSubrange(buffer.startIndex...newline)
@@ -270,17 +300,21 @@ final class KnobBluetooth {
         guard let device = device else { return }
         var data = Array(line.utf8)
         data.append(10)
-        var offset = 0
-        while offset < data.count {
-            let end = min(offset + LINK_REPORT_BYTES, data.count)
-            var report = [LINK_REPORT_ID] + Array(data[offset..<end])
-            report += [UInt8](repeating: 0, count: LINK_REPORT_BYTES + 1 - report.count)
-            let result = IOHIDDeviceSetReport(device, kIOHIDReportTypeOutput, CFIndex(LINK_REPORT_ID), report, report.count)
-            if result != kIOReturnSuccess {
-                print("Knob (Bluetooth): write failed (\(result))")
-                return
+        lastMessageAt = Date()   // expect an answer soon: poll quickly
+        writer.async { [weak self] in
+            guard self?.device == device else { return }
+            var offset = 0
+            while offset < data.count {
+                let end = min(offset + LINK_WRITE_BYTES, data.count)
+                var report = [LINK_REPORT_ID] + Array(data[offset..<end])
+                report += [UInt8](repeating: 0, count: LINK_REPORT_BYTES + 1 - report.count)
+                let result = IOHIDDeviceSetReport(device, kIOHIDReportTypeOutput, CFIndex(LINK_REPORT_ID), report, report.count)
+                if result != kIOReturnSuccess {
+                    print("Knob (Bluetooth): write failed (\(result))")
+                    return
+                }
+                offset = end
             }
-            offset = end
         }
     }
 
@@ -311,6 +345,9 @@ final class Link {
     var frontApp: NSRunningApplication?
     var pluginState: [String: String] = [:]   // last "module" / "tool" line from the plugin, replayed to the knob
     var mediaState = ""                        // "playing" / "paused" / "" from Music or Spotify
+    var pingSeq = 0
+    var pingSent: [Int: Date] = [:]
+    var pongFirst: [Int: Date] = [:]
 
     init() {
         port.onConnect = { [weak self] in
@@ -350,8 +387,10 @@ final class Link {
 
         // Every 2 s: connect if the knob isn't, and ask again if it hasn't said hello
         // (opening the port can restart the knob, so the first hello may be missed)
+        var tick = 0
         Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             guard let self = self else { return }
+            tick += 1
             if !self.port.isOpen {
                 self.port.tryOpen()
             }
@@ -360,6 +399,12 @@ final class Link {
             }
             if self.knobOpen && self.knobProfiles.isEmpty {
                 self.knobSend(["t": "hello"])
+            }
+            if self.knobOpen && !self.knobProfiles.isEmpty && tick % 5 == 0 {
+                // Round-trip timer every 10 s, to keep an eye on the link
+                self.pingSeq += 1
+                self.pingSent[self.pingSeq] = Date()
+                self.knobSend(["t": "ping", "s": self.pingSeq])
             }
             self.toPlugin.tryConnect()
             self.fromPlugin.tryConnect()
@@ -439,7 +484,25 @@ final class Link {
               let type = message["t"] as? String else { return }
 
         switch type {
-        case "turn", "act":
+        case "pong":
+            if let k = message["k"] as? Int, let seq = message["s"] as? Int, let first = pongFirst[seq] {
+                print("  extra pong \(k): +\(Int(Date().timeIntervalSince(first) * 1000)) ms after the first")
+                return
+            }
+            if let seq = message["s"] as? Int, let sent = pingSent.removeValue(forKey: seq) {
+                pongFirst[seq] = Date()
+                let ms = Int(Date().timeIntervalSince(sent) * 1000)
+                var rhythm = ""
+                if let itvl = message["itvl"] as? Double, let lat = message["lat"] as? Int {
+                    rhythm = ", slots every \(itvl * 1.25) ms, \(lat) skipped"
+                }
+                if let held = message["held"] as? Int { rhythm += ", knob held it \(held) ms" }
+                if let prev = message["prev"] as? Int, let rep = message["rep"] as? Int {
+                    rhythm += ", previous send \(prev) ms for \(rep) reports\((message["ok"] as? Bool) == false ? " (FAILED)" : "")"
+                }
+                if ms > 400 { print("Link round trip: \(ms) ms over \(port.isOpen ? "USB" : "Bluetooth")\(rhythm)") }
+            }
+        case "turn", "n", "act":
             toPlugin.sendLine(line)  // for the Lightroom plugin
         case "hello":
             knobProfiles = message["profiles"] as? [String] ?? []

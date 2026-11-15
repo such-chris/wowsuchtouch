@@ -31,6 +31,10 @@ class BleOutput {
         bool linkSubscribed();                   // connected (the Mac app may be listening)
         void linkSend(const char* line);         // adds the newline, splits long lines
         bool linkReadLine(String& line);         // a complete line from the Mac, if any
+        // The connection rhythm the Mac is using: slot spacing in 1.25 ms units, skipped slots
+        bool connParams(uint16_t& interval, uint16_t& latency);
+        uint32_t linkLastWriteMs();              // when the Mac's last bytes arrived (millis)
+        void linkSendStats(uint32_t& ms, uint8_t& reports, bool& ok);   // about the last send
 
         // Forget every paired Mac/iPad (they'll need to pair again)
         void forgetAllDevices();
@@ -65,6 +69,7 @@ class BleOutput {
         // touched until that's finished. update() checks and then sets this.
         bool ready_ = false;
         uint32_t begin_ms_ = 0;
+        uint32_t last_conn_params_ms_ = 0;
 
         void tapMediaKey(uint32_t media_key);
         void tapKey(uint8_t key);

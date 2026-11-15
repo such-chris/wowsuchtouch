@@ -34,7 +34,8 @@ bool parseKeyCombo(const char* text, KeyCombo& out);
 // PAGE: open a page of this module by label ("page:Rating"; "page:A|B" picks by current view)
 // VIEW: switch to the other "view" page (a page with an enter key, e.g. Grid <-> Loupe)
 // NOTHING: "none" in the profile, switches a gesture's default off
-enum class ActionKind { NONE, NOTHING, KEY, NEXT_PAGE, NEXT_MODULE, PREV_MODULE, NEXT_MODE, PREV_MODE, LINK, MODULE, PAGE, VIEW };
+// BACK: return to the view page (Grid / Loupe) you came from
+enum class ActionKind { NONE, NOTHING, KEY, NEXT_PAGE, NEXT_MODULE, PREV_MODULE, NEXT_MODE, PREV_MODE, LINK, MODULE, PAGE, VIEW, BACK };
 struct Action {
     ActionKind kind = ActionKind::NONE;   // NONE = use the gesture's default
     KeyCombo key;
@@ -73,6 +74,7 @@ struct ProfilePage {
     // Screen: hide the number / the ring, and what each swipe does (shown at the edges)
     bool show_value = true;
     bool show_label = true;         // false: nothing in the middle (e.g. Lightroom Grid)
+    uint16_t timeout_s = 0;         // after this long without a turn or touch, go back to the view page
     uint8_t display = 0;            // UiControlStyle: 0 normal, 1 "spring", 2 "direction"
     bool show_ring = true;
     String hint_left, hint_right, hint_up, hint_down;

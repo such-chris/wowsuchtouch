@@ -28,6 +28,7 @@
 //   page, or on a module for all its pages); label "%view%" = the other view page's name
 // "pick_value": "rating" / "label" = a picker opens on the photo's current value
 // Actions "module:Color" open that module; keys may be media: play, next, prev, mute
+// "back" returns to the view page (Grid / Loupe); "timeout_s" does the same after idling
 // "none" switches a gesture's default off; a profile-level "triple_tap" applies to all its pages
 // Hints can be words or ":x:", ":check:", ":palette:", ":star:"
 // "display": "spring" (speed meter) or "direction" (flashing arrow) for the control screen
@@ -47,15 +48,15 @@ static const char MAC_PROFILE[] = R"JSON(
   "mode_toasts": false,
   "modes": [
     { "name": "Volume", "modules": [ { "name": "Volume", "pages": [
-      { "label": "Volume", "turn": "volume", "swipe_up": "next_mode", "swipe_down": "prev_mode",
-        "tap": "play", "swipe_right": "next", "swipe_left": "prev", "double_tap": "mute", "long_press": "none",
+      { "label": "Volume", "turn": "volume", "swipe_left": "next_mode", "swipe_right": "prev_mode",
+        "tap": "play", "swipe_up": "next", "swipe_down": "prev", "long_press": "mute",
         "feel": { "min": 0, "max": 64, "start": 32, "step_deg": 5, "detent": 0.8 } } ] } ] },
     { "name": "Scroll", "modules": [ { "name": "Scroll", "pages": [
-      { "label": "Scroll", "turn": "scroll", "swipe_up": "next_mode", "swipe_down": "prev_mode",
+      { "label": "Scroll", "turn": "scroll", "swipe_left": "next_mode", "swipe_right": "prev_mode",
         "display": "spring",
         "feel": { "min": 0, "max": 0, "step_deg": 60 } } ] } ] },
     { "name": "Arrows", "modules": [ { "name": "Arrows", "pages": [
-      { "label": "Arrows", "sub": "Left / Right", "turn": "arrows", "swipe_up": "next_mode", "swipe_down": "prev_mode",
+      { "label": "Arrows", "sub": "Left / Right", "turn": "arrows", "swipe_left": "next_mode", "swipe_right": "prev_mode",
         "display": "direction", "ring": false,
         "feel": { "step_deg": 15, "detent": 1 } } ] } ] }
   ]
@@ -85,53 +86,53 @@ static const char LIGHTROOM_PROFILE[] = R"JSON(
           "turn": { "cw": "right", "ccw": "left" },
           "swipe_left": "x", "swipe_right": "p", "long_press": "none", "show_value": false, "show_label": false, "ring": false,
           "feel": { "step_deg": 15, "detent": 1 } },
-        { "label": "Thumbnails", "turn": { "cw": "=", "ccw": "-" }, "swipe_left": "page:Grid", "long_press": "none",
+        { "label": "Thumbnails", "turn": { "cw": "=", "ccw": "-" }, "tap": "back", "timeout_s": 15, "long_press": "none",
           "show_value": false, "feel": { "min": 0, "max": 16, "start": 8, "step_deg": 12, "detent": 0.6 } },
-        { "label": "Zoom", "turn": { "cw": "cmd+=", "ccw": "cmd+-" }, "swipe_left": "page:Loupe", "long_press": "none",
+        { "label": "Zoom", "turn": { "cw": "cmd+=", "ccw": "cmd+-" }, "tap": "back", "timeout_s": 15, "long_press": "none",
           "show_value": false, "feel": { "min": 0, "max": 16, "start": 8, "step_deg": 12, "detent": 0.6 } },
-        { "label": "Rating", "pick_style": "count", "pick_value": "rating", "pick": [
+        { "label": "Rating", "pick_style": "count", "pick_value": "rating", "timeout_s": 30, "pick": [
           { "label": "No stars", "key": "0" }, { "label": "1 star", "key": "1", "icon": "star" },
           { "label": "2 stars", "key": "2", "icon": "star" }, { "label": "3 stars", "key": "3", "icon": "star" },
           { "label": "4 stars", "key": "4", "icon": "star" }, { "label": "5 stars", "key": "5", "icon": "star" } ] },
-        { "label": "Color", "pick_style": "ring", "pick_value": "label", "pick": [
+        { "label": "Color", "pick_style": "ring", "pick_value": "label", "timeout_s": 30, "pick": [
           { "label": "Red", "key": "6", "icon": "red" }, { "label": "Yellow", "key": "7", "icon": "yellow" },
           { "label": "Green", "key": "8", "icon": "green" }, { "label": "Blue", "key": "9", "icon": "blue" },
           { "label": "Purple", "key": "link:label:Purple", "icon": "purple" } ] } ] } ] },
     { "name": "Develop", "module": "develop", "modules": [
       { "name": "Exposure", "pages": [
-          { "label": "Exposure", "short": "Exposure", "enter": "d", "turn": { "param": "Exposure2012" }, "long_press": "link:reset",
+          { "label": "Exposure", "short": "Exposure", "enter": "d", "turn": { "param": "Exposure2012" }, "long_press": "link:reset", "swipe_left": "next_mode", "swipe_right": "prev_mode",
             "feel": { "min": -100, "max": 100, "start": 0, "step_deg": 3, "detent": 0.4 } },
-          { "label": "Whites", "short": "Whites", "enter": "d", "turn": { "param": "Whites2012" }, "long_press": "link:reset",
+          { "label": "Whites", "short": "Whites", "enter": "d", "turn": { "param": "Whites2012" }, "long_press": "link:reset", "swipe_left": "next_mode", "swipe_right": "prev_mode",
             "feel": { "min": -100, "max": 100, "start": 0, "step_deg": 3, "detent": 0.4 } },
-          { "label": "Blacks", "short": "Blacks", "enter": "d", "turn": { "param": "Blacks2012" }, "long_press": "link:reset",
+          { "label": "Blacks", "short": "Blacks", "enter": "d", "turn": { "param": "Blacks2012" }, "long_press": "link:reset", "swipe_left": "next_mode", "swipe_right": "prev_mode",
             "feel": { "min": -100, "max": 100, "start": 0, "step_deg": 3, "detent": 0.4 } },
-          { "label": "Contrast", "short": "Contrast", "enter": "d", "turn": { "param": "Contrast2012" }, "long_press": "link:reset",
+          { "label": "Contrast", "short": "Contrast", "enter": "d", "turn": { "param": "Contrast2012" }, "long_press": "link:reset", "swipe_left": "next_mode", "swipe_right": "prev_mode",
             "feel": { "min": -100, "max": 100, "start": 0, "step_deg": 3, "detent": 0.4 } },
-          { "label": "Shadows", "short": "Shadows", "enter": "d", "turn": { "param": "Shadows2012" }, "long_press": "link:reset",
+          { "label": "Shadows", "short": "Shadows", "enter": "d", "turn": { "param": "Shadows2012" }, "long_press": "link:reset", "swipe_left": "next_mode", "swipe_right": "prev_mode",
             "feel": { "min": -100, "max": 100, "start": 0, "step_deg": 3, "detent": 0.4 } },
-          { "label": "Highlights", "short": "Highlights", "enter": "d", "turn": { "param": "Highlights2012" }, "long_press": "link:reset",
+          { "label": "Highlights", "short": "Highlights", "enter": "d", "turn": { "param": "Highlights2012" }, "long_press": "link:reset", "swipe_left": "next_mode", "swipe_right": "prev_mode",
             "feel": { "min": -100, "max": 100, "start": 0, "step_deg": 3, "detent": 0.4 } } ] },
       { "name": "Presence", "pages": [
-          { "label": "Texture", "short": "Texture", "enter": "d", "turn": { "param": "Texture" }, "long_press": "link:reset",
+          { "label": "Texture", "short": "Texture", "enter": "d", "turn": { "param": "Texture" }, "long_press": "link:reset", "swipe_left": "next_mode", "swipe_right": "prev_mode",
             "feel": { "min": -100, "max": 100, "start": 0, "step_deg": 3, "detent": 0.4 } },
-          { "label": "Clarity", "short": "Clarity", "enter": "d", "turn": { "param": "Clarity2012" }, "long_press": "link:reset",
+          { "label": "Clarity", "short": "Clarity", "enter": "d", "turn": { "param": "Clarity2012" }, "long_press": "link:reset", "swipe_left": "next_mode", "swipe_right": "prev_mode",
             "feel": { "min": -100, "max": 100, "start": 0, "step_deg": 3, "detent": 0.4 } },
-          { "label": "Dehaze", "short": "Dehaze", "enter": "d", "turn": { "param": "Dehaze" }, "long_press": "link:reset",
+          { "label": "Dehaze", "short": "Dehaze", "enter": "d", "turn": { "param": "Dehaze" }, "long_press": "link:reset", "swipe_left": "next_mode", "swipe_right": "prev_mode",
             "feel": { "min": -100, "max": 100, "start": 0, "step_deg": 3, "detent": 0.4 } },
-          { "label": "Vibrance", "short": "Vibrance", "enter": "d", "turn": { "param": "Vibrance" }, "long_press": "link:reset",
+          { "label": "Vibrance", "short": "Vibrance", "enter": "d", "turn": { "param": "Vibrance" }, "long_press": "link:reset", "swipe_left": "next_mode", "swipe_right": "prev_mode",
             "feel": { "min": -100, "max": 100, "start": 0, "step_deg": 3, "detent": 0.4 } },
-          { "label": "Saturation", "short": "Saturation", "enter": "d", "turn": { "param": "Saturation" }, "long_press": "link:reset",
+          { "label": "Saturation", "short": "Saturation", "enter": "d", "turn": { "param": "Saturation" }, "long_press": "link:reset", "swipe_left": "next_mode", "swipe_right": "prev_mode",
             "feel": { "min": -100, "max": 100, "start": 0, "step_deg": 3, "detent": 0.4 } } ] },
       { "name": "Color", "pages": [
-          { "label": "Temp", "short": "Temp", "enter": "d", "turn": { "param": "Temperature" }, "long_press": "link:reset",
+          { "label": "Temp", "short": "Temp", "enter": "d", "turn": { "param": "Temperature" }, "long_press": "link:reset", "swipe_left": "next_mode", "swipe_right": "prev_mode",
             "feel": { "min": -100, "max": 100, "start": 0, "step_deg": 3, "detent": 0.4 } },
-          { "label": "Tint", "short": "Tint", "enter": "d", "turn": { "param": "Tint" }, "long_press": "link:reset",
+          { "label": "Tint", "short": "Tint", "enter": "d", "turn": { "param": "Tint" }, "long_press": "link:reset", "swipe_left": "next_mode", "swipe_right": "prev_mode",
             "feel": { "min": -100, "max": 100, "start": 0, "step_deg": 3, "detent": 0.4 } } ] } ] },
     { "name": "Brush", "tools": [ "masking", "dust", "localized" ], "modules": [ { "name": "Brush", "pages": [
-      { "label": "Brush size",
+      { "label": "Brush size", "swipe_left": "next_mode", "swipe_right": "prev_mode",
         "turn": { "cw": "]", "ccw": "[" },
         "feel": { "step_deg": 8, "detent": 0.6 } },
-      { "label": "Feather",
+      { "label": "Feather", "swipe_left": "next_mode", "swipe_right": "prev_mode",
         "turn": { "cw": "shift+]", "ccw": "shift+[" },
         "feel": { "step_deg": 8, "detent": 0.6 } } ] } ] }
   ]
@@ -323,6 +324,10 @@ static bool readAction(JsonVariantConst value, Action& out, String& error) {
         out.name = text + 5;
         return true;
     }
+    if (text != nullptr && strcmp(text, "back") == 0) {
+        out.kind = ActionKind::BACK;
+        return true;
+    }
     if (text != nullptr && strcmp(text, "view") == 0) {
         out.kind = ActionKind::VIEW;
         return true;
@@ -414,6 +419,7 @@ bool parseProfile(const char* json, Profile& out, String& error) {
                 }
                 page.show_value = p["show_value"] | true;
                 page.show_label = p["show_label"] | true;
+                page.timeout_s = p["timeout_s"] | 0;
                 const char* pick_style = p["pick_style"] | "";
                 page.pick_style = strcmp(pick_style, "ring") == 0 ? 1 : (strcmp(pick_style, "count") == 0 ? 2 : 0);
                 page.short_name = p["short"] | "";

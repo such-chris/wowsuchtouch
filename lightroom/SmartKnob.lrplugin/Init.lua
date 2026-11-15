@@ -24,7 +24,7 @@ log:trace('Init.lua loading')
 
 local RECEIVE_PORT = 58810
 local SEND_PORT = 58811
-local TOOL_CHECK_SECONDS = 0.25
+local TOOL_CHECK_SECONDS = 0.05   -- also how often queued value replies go out
 
 if SmartKnobStarted then
     log:trace('already running')
@@ -68,15 +68,21 @@ local function inDevelop()
 end
 
 -- How a value reads on the knob: Exposure "+0.35", Contrast "+12", Temp "5500"
-local function valueText(param, value)
+local function valueFormat(param)
     local low, high = LrDevelopController.getRange(param)
     if low and high and (high - low) <= 20 then
-        return string.format('%+.2f', value)
+        return '%+.2f'
     elseif low and low < 0 then
-        return string.format('%+d', math.floor(value + 0.5))
+        return '%+d'
     else
-        return string.format('%d', math.floor(value + 0.5))
+        return '%d'
     end
+end
+
+local function valueText(param, value)
+    local fmt = valueFormat(param)
+    if fmt == '%+.2f' then return string.format(fmt, value) end
+    return string.format(fmt, math.floor(value + 0.5))
 end
 
 -- ---------------- Main loop ----------------
@@ -93,6 +99,7 @@ LrTasks.startAsyncTask(function()
         local sender = nil
         local sender_connected = false
         local current_param = nil   -- the slider the knob is on (from its last message)
+        local current_step = nil
         local last_tool = nil
         local last_module = nil
         local last_meta = nil
@@ -104,29 +111,61 @@ LrTasks.startAsyncTask(function()
             end
         end
 
-        local function reportValue(param)
+        local last_set_time = 0   -- when we last set a value ourselves (to skip the echo)
+        local last_seq = 0        -- the knob's latest click number
+        local pending_reply = false
+        local pending_full = false   -- the knob opened a slider while Lightroom wasn't in Develop yet
+        local last_reply_time = 0
+
+        -- full = name the slider and include its range (on opening it); otherwise just the value
+        local function reportValue(param, full)
             if not param or not inDevelop() then return end
             local value = LrDevelopController.getValue(param)
-            if type(value) == 'number' then
+            if type(value) ~= 'number' then return end
+            if full then
                 local low, high = LrDevelopController.getRange(param)
-                send({ t = 'val', param = param, v = value, txt = valueText(param, value), lo = low or 0, hi = high or 0 })
+                send({ t = 'val', param = param, v = value, txt = valueText(param, value),
+                       lo = low or 0, hi = high or 0, fmt = valueFormat(param) })
+            else
+                send({ t = 'val', v = value, s = last_seq })
             end
+        end
+
+        -- While the knob turns, answer at most 10 times a second (each answer is a slow
+        -- write to the knob); the final answer carries the latest click number
+        local function replySoon()
+            pending_reply = true
+        end
+
+        local function nudge(param, steps, step)
+            local low, high = LrDevelopController.getRange(param)
+            if not low then return end
+            step = step or ((high - low) / 200)   -- 200 detents end to end
+            local value = LrDevelopController.getValue(param) + steps * step
+            value = math.max(low, math.min(high, value))
+            last_set_time = os.clock()
+            LrDevelopController.setValue(param, value)
+            replySoon()
         end
 
         local function handle(message)
             if message.t == 'turn' and message.param then
+                -- Opening a slider (d = 0): remember it and send value + range
                 current_param = message.param
-                if not inDevelop() then return end
-                local steps = message.d or 0
-                if steps ~= 0 then
-                    local low, high = LrDevelopController.getRange(message.param)
-                    if not low then return end
-                    local step = message.step or ((high - low) / 200)   -- 200 detents end to end
-                    local value = LrDevelopController.getValue(message.param) + steps * step
-                    value = math.max(low, math.min(high, value))
-                    LrDevelopController.setValue(message.param, value)
+                current_step = message.step
+                if not inDevelop() then
+                    pending_full = true   -- answer as soon as Develop is showing
+                    return
                 end
-                reportValue(message.param)
+                if (message.d or 0) ~= 0 then
+                    nudge(message.param, message.d, message.step)
+                end
+                reportValue(message.param, true)
+            elseif message.t == 'n' and current_param then
+                -- A click on the slider the knob is on
+                last_seq = message.s or 0
+                if not inDevelop() then return end
+                nudge(current_param, message.d or 0, current_step)
             elseif message.t == 'act' and message.a and message.a:sub(1, 6) == 'label:' then
                 -- Color label (Purple has no shortcut). Like Lightroom's keys it toggles:
                 -- if every selected photo already has it, it's removed.
@@ -148,8 +187,9 @@ LrTasks.startAsyncTask(function()
                 end)
             elseif message.t == 'act' and message.a == 'reset' and message.param then
                 if not inDevelop() then return end
+                last_set_time = os.clock()
                 LrDevelopController.resetToDefault(message.param)
-                reportValue(message.param)
+                replySoon()
             end
         end
 
@@ -202,7 +242,10 @@ LrTasks.startAsyncTask(function()
         -- Value changes made any other way (mouse, new photo) show on the knob too
         pcall(function()
             LrDevelopController.addAdjustmentChangeObserver(context, {}, function()
-                reportValue(current_param)
+                -- Mouse edits, new photo...; our own changes already reported themselves
+                if os.clock() - last_set_time > 0.3 then
+                    replySoon()
+                end
             end)
         end)
 
@@ -210,6 +253,15 @@ LrTasks.startAsyncTask(function()
         SmartKnobStatus = 'listening on ' .. RECEIVE_PORT .. ' and ' .. SEND_PORT
         LrDialogs.showBezel('SmartKnob ready')
         while SmartKnobRunning do
+            if pending_full and inDevelop() then
+                pending_full = false
+                reportValue(current_param, true)
+            end
+            if pending_reply and os.clock() - last_reply_time > 0.1 then
+                pending_reply = false
+                last_reply_time = os.clock()
+                reportValue(current_param, false)
+            end
             -- Which module is showing (library, develop...)
             local module = LrApplicationView.getCurrentModuleName() or 'none'
             if module ~= last_module and sender_connected then

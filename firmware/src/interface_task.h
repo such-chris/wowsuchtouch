@@ -165,8 +165,16 @@ class InterfaceTask : public Task<InterfaceTask>, public Logger {
         void openPage(int page);
         int viewPage(bool other);         // the last "view" page of this module (or the other one)
         int view_page_ = 0;
+        uint32_t page_opened_ms_ = 0;
+        void checkPageTimeout();
         const std::vector<PickOption>& edgeButtons();
         void syncLinkValue(float value, float low, float high);
+        void showLinkEstimate();          // the knob's own guess at the value, before Lightroom answers
+        float link_low_ = 0, link_high_ = 0;   // range of the slider the knob is on (0,0 = unknown)
+        String link_format_;              // how Lightroom formats it: "%+.2f", "%+d", "%d"
+        String formatLinkValue(float value);
+        uint32_t link_seq_ = 0;           // counts our clicks; replies name the click they answer
+        uint32_t last_turn_ms_ = 0;
         void openControls(int menu_index);
         int controls_menu_index_ = 0;
         int mode_before_tool_ = 0;     // where to return when a tool mode (e.g. Brush) closes
