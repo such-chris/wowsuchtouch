@@ -138,10 +138,25 @@ class InterfaceTask : public Task<InterfaceTask>, public Logger {
         int current_page_ = 0;
         int page_serial_ = 0;      // goes up every time a page opens
         int appCount() { return (int)profiles_.size(); }
+        std::vector<int> menu_apps_;     // profiles listed in the menu, in order
+        int menuAppCount() { return (int)menu_apps_.size(); }
+        int menuIndexOf(int app);        // position in the menu, or -1
         const ProfilePage& currentPage();
         void changeConfig(bool next);   // next / previous mode
         void changeModule(bool next);   // next / previous module
         void nextPage();
+        void openModule(int module);
+        std::vector<int> module_pages_;   // last page used in each module of this mode
+        void sendKey(const KeyCombo& combo, int32_t times = 1);
+        bool runAction(const Action& action, ActionKind fallback, bool strong);
+        void applyPick();
+        void openMode(int mode, int module);
+        void handleTool(const char* tool);
+        void handleModule(const char* module);
+        String link_module_, link_tool_;   // last module / tool the Mac reported
+        int mode_before_tool_ = 0;     // where to return when a tool mode (e.g. Brush) closes
+        int module_before_tool_ = 0;
+        void sendLinkTurn(int32_t steps);
         int findProfile(const char* name);
 
         // ---- Link: JSON messages with the Mac app (one per line, over USB for now) ----

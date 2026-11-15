@@ -7,6 +7,10 @@
 // Each time you switch programs it prints the program's name and ID, e.g.
 //   Front: Safari (com.apple.Safari) -> Mac
 // Copy an ID into appProfiles below to give that program its own profile.
+//
+// It also connects to the SmartKnob Lightroom plugin (if Lightroom is open) and
+// passes messages between it and the knob: knob turns -> plugin, slider values and
+// the open tool -> knob.
 
 import AppKit
 import Foundation
@@ -19,47 +23,32 @@ let defaultProfile = "Mac"
 // Program ID -> knob profile name. A program also matches a knob profile
 // with exactly its name (e.g. a profile called "Finder").
 let appProfiles: [String: String] = [
-    "com.apple.finder": "Demo",   // test only: Finder opens Demo. Remove once real profiles exist
-    // "com.adobe.LightroomClassicCC7": "Lightroom",
+    "com.adobe.LightroomClassicCC7": "Lightroom",
 ]
 
-// ---------------- USB serial port ----------------
+// ---------------- Line channel ----------------
+// Anything we read and write one line of text at a time (the knob's USB port, the
+// plugin's sockets). Set it up with attach(fd:).
 
-final class KnobPort {
-    private var fd: Int32 = -1
+class LineChannel {
+    fileprivate var fd: Int32 = -1
     private var source: DispatchSourceRead?
     private var buffer = Data()
+    let name: String
     var onLine: ((String) -> Void)?
-    var onConnect: (() -> Void)?
+    var onClose: (() -> Void)?
     var isOpen: Bool { return fd >= 0 }
 
-    // The knob shows up as /dev/cu.usbmodem...
-    private func findPort() -> String? {
-        let names = (try? FileManager.default.contentsOfDirectory(atPath: "/dev")) ?? []
-        return names.filter { $0.hasPrefix("cu.usbmodem") }.sorted().first.map { "/dev/" + $0 }
-    }
+    init(name: String) { self.name = name }
 
-    func tryOpen() {
-        guard fd < 0, let path = findPort() else { return }
-        let f = open(path, O_RDWR | O_NOCTTY | O_NONBLOCK)
-        if f < 0 {
-            return  // busy, e.g. the serial monitor has it; try again later
-        }
-        var t = termios()
-        tcgetattr(f, &t)
-        cfmakeraw(&t)
-        cfsetspeed(&t, speed_t(B115200))
-        t.c_cflag |= tcflag_t(CLOCAL | CREAD)
-        tcsetattr(f, TCSANOW, &t)
+    func attach(fd f: Int32) {
+        _ = fcntl(f, F_SETFL, O_NONBLOCK)
         fd = f
-        print("Knob: connected on \(path)")
-
         let s = DispatchSource.makeReadSource(fileDescriptor: f, queue: .main)
         s.setEventHandler { [weak self] in self?.readAvailable() }
         s.setCancelHandler { close(f) }
         source = s
         s.resume()
-        onConnect?()
     }
 
     private func readAvailable() {
@@ -84,21 +73,89 @@ final class KnobPort {
 
     func disconnect() {
         guard fd >= 0 else { return }
-        print("Knob: disconnected")
+        print("\(name): disconnected")
         source?.cancel()
         source = nil
         fd = -1
         buffer.removeAll()
+        onClose?()
     }
 
-    // One message = one line of JSON
-    func send(_ message: [String: Any]) {
-        guard fd >= 0, let data = try? JSONSerialization.data(withJSONObject: message) else { return }
-        var bytes = [UInt8](data)
+    func sendLine(_ line: String) {
+        guard fd >= 0 else { return }
+        var bytes = Array(line.utf8)
         bytes.append(10)
         if write(fd, bytes, bytes.count) < 0 && errno != EAGAIN {
             disconnect()
         }
+    }
+
+    // One message = one line of JSON
+    func send(_ message: [String: Any]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: message),
+              let line = String(data: data, encoding: .utf8) else { return }
+        sendLine(line)
+    }
+}
+
+// The knob: shows up as /dev/cu.usbmodem...
+final class KnobPort: LineChannel {
+    var onConnect: (() -> Void)?
+
+    init() { super.init(name: "Knob") }
+
+    func tryOpen() {
+        guard !isOpen else { return }
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: "/dev")) ?? []
+        guard let path = names.filter({ $0.hasPrefix("cu.usbmodem") }).sorted().first.map({ "/dev/" + $0 }) else { return }
+        let f = open(path, O_RDWR | O_NOCTTY | O_NONBLOCK)
+        if f < 0 {
+            return  // busy, e.g. the serial monitor has it; try again later
+        }
+        var t = termios()
+        tcgetattr(f, &t)
+        cfmakeraw(&t)
+        cfsetspeed(&t, speed_t(B115200))
+        t.c_cflag |= tcflag_t(CLOCAL | CREAD)
+        tcsetattr(f, TCSANOW, &t)
+        attach(fd: f)
+        print("Knob: connected on \(path)")
+        onConnect?()
+    }
+}
+
+// The Lightroom plugin: two local sockets, one each way (Lightroom's sockets are one-way)
+let LIGHTROOM_TO_PLUGIN_PORT: UInt16 = 58810   // we write here
+let LIGHTROOM_FROM_PLUGIN_PORT: UInt16 = 58811 // we read here
+
+final class SocketChannel: LineChannel {
+    let port: UInt16
+    init(name: String, port: UInt16) {
+        self.port = port
+        super.init(name: name)
+    }
+
+    func tryConnect() {
+        guard !isOpen else { return }
+        let s = socket(AF_INET, SOCK_STREAM, 0)
+        if s < 0 { return }
+        var on: Int32 = 1
+        setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = port.bigEndian
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+        let result = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                connect(s, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        if result != 0 {
+            close(s)  // Lightroom (or the plugin) isn't running
+            return
+        }
+        attach(fd: s)
+        print("\(name): connected")
     }
 }
 
@@ -106,6 +163,8 @@ final class KnobPort {
 
 final class Link {
     let port = KnobPort()
+    let toPlugin = SocketChannel(name: "Lightroom plugin (in)", port: LIGHTROOM_TO_PLUGIN_PORT)
+    let fromPlugin = SocketChannel(name: "Lightroom plugin (out)", port: LIGHTROOM_FROM_PLUGIN_PORT)
     var knobProfiles: [String] = []   // from the knob's hello
     var knobProfile: String?          // what the knob has open now
     var frontApp: NSRunningApplication?
@@ -116,6 +175,13 @@ final class Link {
             self?.port.send(["t": "hello"])
         }
         port.onLine = { [weak self] line in self?.handle(line) }
+        // Everything the plugin says goes straight to the knob (values, the open tool)
+        fromPlugin.onLine = { [weak self] line in
+            if line.contains("\"tool\"") {
+                print("Lightroom: \(line)")  // shows tool names, to match profile "tools"
+            }
+            self?.port.sendLine(line)
+        }
 
         NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
@@ -134,6 +200,8 @@ final class Link {
             } else if self.knobProfiles.isEmpty {
                 self.port.send(["t": "hello"])
             }
+            self.toPlugin.tryConnect()
+            self.fromPlugin.tryConnect()
         }
         port.tryOpen()
     }
@@ -172,6 +240,8 @@ final class Link {
               let type = message["t"] as? String else { return }
 
         switch type {
+        case "turn", "act":
+            toPlugin.sendLine(line)  // for the Lightroom plugin
         case "hello":
             knobProfiles = message["profiles"] as? [String] ?? []
             knobProfile = message["p"] as? String

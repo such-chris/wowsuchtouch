@@ -12,6 +12,13 @@ enum class UiLayout : uint8_t {
     VALUE,    // a setting: big number, or two lines of info
 };
 
+// How a CONTROL screen draws the knob
+enum class UiControlStyle : uint8_t {
+    NORMAL,     // ring with the range, dot at the value
+    SPRING,     // meter growing from the middle, end marks, arrow brightening with speed
+    DIRECTION,  // a big arrow flashes the way you turned
+};
+
 static const uint8_t UI_MAX_ITEMS = 8;
 static const uint8_t UI_TEXT_LEN = 24;
 
@@ -35,6 +42,16 @@ struct UiScreen {
     char suffix[6] = {};
     char line1[UI_TEXT_LEN] = {};
     char line2[UI_TEXT_LEN] = {};
+
+    // CONTROL extras: hide the big number / the ring, and short hints at the edges
+    // saying what each swipe does (empty = no hint)
+    UiControlStyle control_style = UiControlStyle::NORMAL;
+    bool hide_value = false;
+    bool hide_ring = false;
+    char hint_left[12] = {};
+    char hint_right[12] = {};
+    char hint_up[12] = {};
+    char hint_down[12] = {};
 };
 
 // Status line at the top of every screen
@@ -42,6 +59,12 @@ struct UiStatus {
     bool bluetooth = false;   // connected to a Mac / iPad
     bool usb = false;         // plugged into a computer (charging)
     int8_t battery_pct = -1;  // -1 = no reading
+};
+
+// Text shown in place of the knob's number (e.g. "+0.35" from Lightroom).
+// Cleared whenever a new screen is shown.
+struct UiValueText {
+    char text[16] = {};
 };
 
 // A short message that pops up and fades away

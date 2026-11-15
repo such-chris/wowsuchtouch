@@ -101,8 +101,10 @@ Every gesture is printed in the monitor, e.g. `Touch: DOUBLE_TAP at (120, 98)`, 
 | Function button press | in an app | main menu (apps, Settings, Sleep, Power off) |
 | Function button press | in a menu | back to the app |
 | Function button hold (2 s) | anywhere | power off |
-| Swipe left / right | in an app | next / previous page (e.g. Volume -> Scroll) |
-| Tap, double tap, triple tap, long press, swipe up / down | in an app | free for app actions (tap = knob push) |
+| Double tap | in an app | next mode (e.g. Volume -> Scroll) |
+| Swipe up / down | in an app | next / previous module (unless the profile uses them) |
+| Long press | in an app | next page (unless the profile uses it) |
+| Tap, triple tap, swipe left / right | in an app | set by each profile (see `profiles.cpp`) |
 | Turn the knob | in a menu | move through the list (one click per item) |
 | Tap / swipe left | in a menu | open / choose |
 | Swipe right | in a menu | back |

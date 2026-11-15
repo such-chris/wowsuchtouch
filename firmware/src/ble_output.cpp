@@ -193,6 +193,20 @@ void BleOutput::arrowSteps(int32_t steps) {
     }
 }
 
+void BleOutput::sendKey(uint8_t modifiers, uint8_t key, int32_t times) {
+    if (!isConnected() || key == 0) return;
+    releaseModifiers();
+    times = limitSteps(abs(times));
+    for (int32_t i = 0; i < times; i++) {
+        if (modifiers) keyboard_->modifierKeyPress(modifiers);
+        keyboard_->keyPress(key);
+        keyboard_->sendKeyReport();
+        keyboard_->keyRelease(key);
+        if (modifiers) keyboard_->modifierKeyRelease(modifiers);
+        keyboard_->sendKeyReport();
+    }
+}
+
 void BleOutput::forgetAllDevices() {
     if (!ready_) {
         return;

@@ -50,6 +50,7 @@ static const float SCROLL_DEAD_ZONE = 0.08;      // ignore tiny wobbles around c
 static const float SCROLL_MIN_RATE = 6;          // wheel ticks per second just past the dead zone
 static const float SCROLL_EXTRA_RATE = 120;      // added at full deflection (grows with the square)
 static const float RIM_SCROLL_DEGREES = 5;       // rim travel per wheel tick in Scroll mode
+static const float RIM_KEY_DEGREES = 20;         // rim travel per key press on pages with rim keys
 
 // Volume: pushing past an end stop by this much (in steps) re-syncs with the Mac
 static const float VOLUME_RESYNC_PUSH = 0.3;
@@ -207,6 +208,11 @@ void InterfaceTask::run() {
     loadBuiltinProfiles(profiles_, [this] (const char* msg) { log(msg); });
     snprintf(buf_, sizeof(buf_), "Profiles: %d loaded", (int)profiles_.size());
     log(buf_);
+    for (int i = 0; i < (int)profiles_.size(); i++) {
+        if (profiles_[i].in_menu) {
+            menu_apps_.push_back(i);
+        }
+    }
     if (profiles_.empty()) {
         // Never leave the knob with nothing to open
         log("No profiles loaded: using a plain knob");
@@ -219,8 +225,15 @@ void InterfaceTask::run() {
         page.feel.endstop_strength_unit = 1;
         page.feel.snap_point = 1.1;
         strncpy(page.feel.text, "Knob", sizeof(page.feel.text) - 1);
-        plain.modes.push_back(ProfileMode{"Knob", {ProfileModule{"Knob", {page}}}});
+        ProfileModule module;
+        module.name = "Knob";
+        module.pages.push_back(page);
+        ProfileMode mode;
+        mode.name = "Knob";
+        mode.modules.push_back(module);
+        plain.modes.push_back(mode);
         profiles_.push_back(plain);
+        menu_apps_.push_back(0);
     }
 
     // Restore saved settings and open the last-used app
@@ -234,7 +247,7 @@ void InterfaceTask::run() {
         motor_task_.setRelaxed(true);
         showChargingScreen();
     } else {
-        openApp(settings_.app < appCount() ? settings_.app : 0);
+        openApp(menuIndexOf(settings_.app) >= 0 ? settings_.app : (menu_apps_.empty() ? 0 : menu_apps_[0]));
     }
     sendStatus();
     motor_task_.addListener(knob_state_queue_);
@@ -386,10 +399,141 @@ void InterfaceTask::changeConfig(bool next) {
     if (nav_screen_ != NavScreen::APP) {
         return;
     }
-    current_mode_ = wrapIndex(current_mode_ + (next ? 1 : -1), profiles_[current_app_].modes.size());
+    const Profile& profile = profiles_[current_app_];
+    int count = profile.modes.size();
+    int mode = current_mode_;
+    for (int tries = 0; tries < count; tries++) {
+        mode = wrapIndex(mode + (next ? 1 : -1), count);
+        if (profile.modes[mode].tools.empty()) {
+            break;  // tool modes (e.g. Brush) only open by themselves
+        }
+    }
+    current_mode_ = mode;
     current_module_ = 0;
     current_page_ = 0;
+    module_pages_.clear();
     applyAppPage();
+    toast(profiles_[current_app_].modes[current_mode_].name.c_str());
+    // e.g. Lightroom: Library opens the grid, Develop opens Develop
+    sendKey(currentPage().enter);
+}
+
+void InterfaceTask::sendKey(const KeyCombo& combo, int32_t times) {
+    #if SK_BLE
+        if (combo.isSet()) {
+            ble_.sendKey(combo.modifiers, combo.key, times);
+        }
+    #endif
+}
+
+// Do a gesture's action (or its default when the page doesn't set one)
+bool InterfaceTask::runAction(const Action& action, ActionKind fallback, bool strong) {
+    ActionKind kind = action.isSet() ? action.kind : fallback;
+    if (kind == ActionKind::NONE) {
+        return false;
+    }
+    motor_task_.playHaptic(strong);
+    switch (kind) {
+        case ActionKind::KEY:         sendKey(action.key); break;
+        case ActionKind::NEXT_PAGE:   nextPage(); break;
+        case ActionKind::NEXT_MODULE: changeModule(true); break;
+        case ActionKind::PREV_MODULE: changeModule(false); break;
+        case ActionKind::NEXT_MODE:   changeConfig(true); break;
+        case ActionKind::PREV_MODE:   changeConfig(false); break;
+        case ActionKind::LINK: {
+            JsonDocument doc;
+            doc["t"] = "act";
+            doc["a"] = action.name;
+            doc["param"] = currentPage().param;
+            sendLink(doc);
+            break;
+        }
+        default: break;
+    }
+    return true;
+}
+
+void InterfaceTask::sendLinkTurn(int32_t steps) {
+    const ProfilePage& page = currentPage();
+    JsonDocument doc;
+    doc["t"] = "turn";
+    doc["param"] = page.param;
+    doc["d"] = steps;
+    if (page.step > 0) {
+        doc["step"] = page.step;
+    }
+    sendLink(doc);
+}
+
+void InterfaceTask::openMode(int mode, int module) {
+    const Profile& profile = profiles_[current_app_];
+    current_mode_ = CLAMP(mode, 0, (int)profile.modes.size() - 1);
+    current_module_ = CLAMP(module, 0, (int)profile.modes[current_mode_].modules.size() - 1);
+    current_page_ = 0;
+    module_pages_.clear();
+    applyAppPage();
+    toast(profile.modes[current_mode_].name.c_str());
+}
+
+// The Mac says which module the program is in (Lightroom: "library", "develop"):
+// open the mode for it. While a tool mode is open, it's where you return to after.
+void InterfaceTask::handleModule(const char* module) {
+    if (nav_screen_ != NavScreen::APP) {
+        return;
+    }
+    const Profile& profile = profiles_[current_app_];
+    for (int i = 0; i < (int)profile.modes.size(); i++) {
+        if (profile.modes[i].module.length() > 0 && profile.modes[i].module.equalsIgnoreCase(module)) {
+            if (!profile.modes[current_mode_].tools.empty()) {
+                mode_before_tool_ = i;
+                module_before_tool_ = 0;
+            } else if (i != current_mode_) {
+                openMode(i, 0);
+            }
+            return;
+        }
+    }
+}
+
+// The Mac says which tool is in use (e.g. Lightroom "masking"): open the mode that
+// lists it, and go back to where you were when it closes
+void InterfaceTask::handleTool(const char* tool) {
+    if (nav_screen_ != NavScreen::APP) {
+        return;
+    }
+    const Profile& profile = profiles_[current_app_];
+    int tool_mode = -1;
+    for (int i = 0; i < (int)profile.modes.size() && tool_mode < 0; i++) {
+        for (const String& t : profile.modes[i].tools) {
+            if (t.equalsIgnoreCase(tool)) {
+                tool_mode = i;
+                break;
+            }
+        }
+    }
+    bool in_tool_mode = !profile.modes[current_mode_].tools.empty();
+    if (tool_mode >= 0 && tool_mode != current_mode_) {
+        if (!in_tool_mode) {
+            mode_before_tool_ = current_mode_;
+            module_before_tool_ = current_module_;
+        }
+        openMode(tool_mode, 0);
+    } else if (tool_mode < 0 && in_tool_mode) {
+        openMode(mode_before_tool_, module_before_tool_);
+    }
+}
+
+// Picker page: send the chosen option's key, then go back to the first module
+void InterfaceTask::applyPick() {
+    const ProfilePage& page = currentPage();
+    if (page.pick.empty()) {
+        return;
+    }
+    int32_t index = CLAMP(selectedIndex(), (int32_t)0, (int32_t)page.pick.size() - 1);
+    const PickOption& option = page.pick[index];
+    runAction(option.action, ActionKind::NONE, true);
+    toast(option.label.c_str());
+    openModule(0);
 }
 
 void InterfaceTask::changeModule(bool next) {
@@ -398,8 +542,16 @@ void InterfaceTask::changeModule(bool next) {
     if (nav_screen_ != NavScreen::APP || mode.modules.size() < 2) {
         return;
     }
-    current_module_ = wrapIndex(current_module_ + (next ? 1 : -1), mode.modules.size());
-    current_page_ = 0;
+    openModule(wrapIndex(current_module_ + (next ? 1 : -1), mode.modules.size()));
+}
+
+void InterfaceTask::openModule(int module) {
+    const ProfileMode& mode = profiles_[current_app_].modes[current_mode_];
+    module = CLAMP(module, 0, (int)mode.modules.size() - 1);
+    module_pages_.resize(mode.modules.size(), 0);
+    module_pages_[current_module_] = current_page_;
+    current_module_ = module;
+    current_page_ = CLAMP(module_pages_[module], 0, (int)mode.modules[module].pages.size() - 1);
     applyAppPage();
 }
 
@@ -411,6 +563,16 @@ void InterfaceTask::nextPage() {
     }
     current_page_ = wrapIndex(current_page_ + 1, module.pages.size());
     applyAppPage();
+    sendKey(currentPage().enter);
+}
+
+int InterfaceTask::menuIndexOf(int app) {
+    for (int i = 0; i < menuAppCount(); i++) {
+        if (menu_apps_[i] == app) {
+            return i;
+        }
+    }
+    return -1;
 }
 
 int InterfaceTask::findProfile(const char* name) {
@@ -456,9 +618,24 @@ void InterfaceTask::handleLinkMessage(const char* line) {
                 current_app_ = index;
                 settings_.app = index;
                 current_mode_ = current_module_ = current_page_ = 0;
+                module_pages_.clear();
             }
         }
         sendLinkResult(nullptr);
+    } else if (strcmp(type, "val") == 0) {
+        // A value to show, e.g. Lightroom's Exposure "+0.35"
+        const char* param = doc["param"] | "";
+        if (nav_screen_ == NavScreen::APP && currentPage().param.equals(param)) {
+            #if SK_DISPLAY
+                display_task_->showValueText(doc["txt"] | "");
+            #endif
+        }
+    } else if (strcmp(type, "tool") == 0) {
+        link_tool_ = doc["tool"] | "";
+        handleTool(link_tool_.c_str());
+    } else if (strcmp(type, "module") == 0) {
+        link_module_ = doc["module"] | "";
+        handleModule(link_module_.c_str());
     } else {
         sendLinkResult("unknown message");
     }
@@ -695,7 +872,16 @@ void InterfaceTask::updateTouch() {
 
         if (ring_is_slide_) {
             #if SK_BLE
-            if (inBleMode((int)TurnOutput::SCROLL)) {
+            if (nav_screen_ == NavScreen::APP && currentPage().rim_cw.isSet()) {
+                // This page gives the rim its own keys (e.g. zoom in Lightroom)
+                ring_scroll_accum_degrees_ += feed_degrees;
+                int32_t presses = (int32_t)(ring_scroll_accum_degrees_ / RIM_KEY_DEGREES);
+                if (presses != 0) {
+                    sendKey(presses > 0 ? currentPage().rim_cw : currentPage().rim_ccw, presses);
+                    ring_scroll_accum_degrees_ -= presses * RIM_KEY_DEGREES;
+                    motor_task_.playHaptic(false);
+                }
+            } else if (inBleMode((int)TurnOutput::SCROLL)) {
                 // Scroll mode has no value to step: the rim scrolls directly
                 ring_scroll_accum_degrees_ += feed_degrees;
                 int32_t ticks = (int32_t)(ring_scroll_accum_degrees_ / RIM_SCROLL_DEGREES);
@@ -760,32 +946,33 @@ void InterfaceTask::updateTouch() {
         return;
     }
 
-    // In an app: swipe left / right = mode, swipe up / down = module, long press = page.
-    // Tap, double tap and triple tap are free for app actions (tap = knob push).
+    // In an app: each page sets what gestures do. Defaults: double tap = next mode,
+    // swipe up / down = module, long press = next page.
+    const ProfilePage& page = currentPage();
     switch (gesture) {
+        case TouchGesture::TAP:
+            if (!page.pick.empty()) {
+                applyPick();
+            } else {
+                runAction(page.tap, ActionKind::NONE, true);
+            }
+            break;
+        case TouchGesture::DOUBLE_TAP:  runAction(page.double_tap, ActionKind::NEXT_MODE, true); break;
+        case TouchGesture::TRIPLE_TAP:  runAction(page.triple_tap, ActionKind::NONE, true); break;
+        case TouchGesture::LONG_PRESS:  runAction(page.long_press, ActionKind::NEXT_PAGE, true); break;
         case TouchGesture::SWIPE_LEFT:
-            motor_task_.playHaptic(false);
-            changeConfig(true);
+            if (!page.pick.empty() && !page.swipe_left.isSet()) {
+                // Picker (Color, Rating): swipe left backs out without choosing
+                motor_task_.playHaptic(false);
+                openModule(0);
+            } else {
+                runAction(page.swipe_left, ActionKind::NONE, false);
+            }
             break;
-        case TouchGesture::SWIPE_RIGHT:
-            motor_task_.playHaptic(false);
-            changeConfig(false);
-            break;
-        case TouchGesture::SWIPE_UP:
-            motor_task_.playHaptic(false);
-            changeModule(true);
-            break;
-        case TouchGesture::SWIPE_DOWN:
-            motor_task_.playHaptic(false);
-            changeModule(false);
-            break;
-        case TouchGesture::LONG_PRESS:
-            motor_task_.playHaptic(true);
-            nextPage();
-            break;
-        default:
-            // Triple tap, and swipes up/down away from the edges: free for app-specific actions
-            break;
+        case TouchGesture::SWIPE_RIGHT: runAction(page.swipe_right, ActionKind::NONE, false); break;
+        case TouchGesture::SWIPE_UP:    runAction(page.swipe_up, ActionKind::NEXT_MODULE, false); break;
+        case TouchGesture::SWIPE_DOWN:  runAction(page.swipe_down, ActionKind::PREV_MODULE, false); break;
+        default: break;
     }
 }
 #endif
@@ -869,6 +1056,15 @@ void InterfaceTask::updateBleOutput() {
         if (steps != 0) {
             ble_.arrowSteps(steps);
         }
+    } else if (inBleMode((int)TurnOutput::LINK)) {
+        if (steps != 0) {
+            sendLinkTurn(steps);
+        }
+    } else if (inBleMode((int)TurnOutput::KEYS)) {
+        if (steps != 0) {
+            const ProfilePage& page = currentPage();
+            sendKey(steps > 0 ? page.turn_cw : page.turn_ccw, steps);
+        }
     }
 }
 #endif
@@ -890,7 +1086,7 @@ void InterfaceTask::updatePowerButton() {
             noteActivity();
             motor_task_.playHaptic(true);
             if (nav_screen_ == NavScreen::APP) {
-                openAppsList(current_app_);  // main menu
+                openAppsList(max(menuIndexOf(current_app_), 0));  // main menu
             } else {
                 openApp(current_app_);       // back to the app
             }
@@ -1049,21 +1245,57 @@ void InterfaceTask::openApp(int app) {
     if (app != current_app_) {
         // A different profile starts at its first mode; returning to the same one keeps your place
         current_mode_ = current_module_ = current_page_ = 0;
+        module_pages_.clear();
+        mode_before_tool_ = module_before_tool_ = 0;
     }
     current_app_ = app;
     settings_.app = current_app_;
     setNavScreen(NavScreen::APP);
     applyAppPage();
+    // Catch up with what the Mac last reported (e.g. Lightroom is already in Develop)
+    if (link_module_.length() > 0) {
+        handleModule(link_module_.c_str());
+    }
+    if (link_tool_.length() > 0) {
+        handleTool(link_tool_.c_str());
+    }
 }
 
 void InterfaceTask::applyAppPage() {
-    UiScreen ui;
-    ui.layout = UiLayout::CONTROL;
-    copyText(ui.title, profiles_[current_app_].name.c_str());
-    showUi(ui);
-
     const ProfilePage& page = currentPage();
     PB_SmartKnobConfig config = page.feel;
+
+    UiScreen ui;
+    if (page.pick.empty()) {
+        ui.layout = UiLayout::CONTROL;
+        if (profiles_[current_app_].title_in_center) {
+            // Profile name in the middle with the page under it; nothing at the top
+            snprintf(config.text, sizeof(config.text), "%s\n%s",
+                profiles_[current_app_].name.c_str(), page.label.c_str());
+        } else {
+            copyText(ui.title, profiles_[current_app_].name.c_str());
+        }
+        ui.hide_value = !page.show_value;
+        ui.control_style = (UiControlStyle)page.display;
+        ui.hide_ring = !page.show_ring;
+        strncpy(ui.hint_left, page.hint_left.c_str(), sizeof(ui.hint_left) - 1);
+        strncpy(ui.hint_right, page.hint_right.c_str(), sizeof(ui.hint_right) - 1);
+        strncpy(ui.hint_up, page.hint_up.c_str(), sizeof(ui.hint_up) - 1);
+        strncpy(ui.hint_down, page.hint_down.c_str(), sizeof(ui.hint_down) - 1);
+    } else {
+        // Picker: the choices in the menu-style list, one click each
+        ui.layout = UiLayout::LIST;
+        copyText(ui.title, page.label.c_str());
+        ui.ring_at_bottom = true;
+        ui.item_count = page.pick.size();
+        for (size_t i = 0; i < page.pick.size(); i++) {
+            copyText(ui.items[i], page.pick[i].label.c_str());
+        }
+        nav_list_count_ = 0;
+        config = makeListConfig(page.label.c_str(), page.pick.size(), 0, 0);
+    }
+    showUi(ui);
+
     #if SK_BLE
         // Volume picks up where it was last left
         if (page.turn == TurnOutput::VOLUME) {
@@ -1077,6 +1309,9 @@ void InterfaceTask::applyAppPage() {
     log(buf_);
     applyConfig(config, false);
     sendWhere();
+    if (page.turn == TurnOutput::LINK) {
+        sendLinkTurn(0);  // "turned 0" = just tell me the current value
+    }
 }
 
 // Main menu: the apps, then Settings, Sleep and Power off
@@ -1087,15 +1322,15 @@ void InterfaceTask::openAppsList(int selected) {
     copyText(ui.title, "Menu");
     ui.ring_at_bottom = true;
     ui.show_status = true;
-    ui.item_count = appCount() + MENU_EXTRA_COUNT;
-    for (int i = 0; i < appCount(); i++) {
-        copyText(ui.items[i], profiles_[i].name.c_str());
+    ui.item_count = menuAppCount() + MENU_EXTRA_COUNT;
+    for (int i = 0; i < menuAppCount(); i++) {
+        copyText(ui.items[i], profiles_[menu_apps_[i]].name.c_str());
     }
     for (int i = 0; i < MENU_EXTRA_COUNT; i++) {
-        copyText(ui.items[appCount() + i], menu_extra_names[i]);
+        copyText(ui.items[menuAppCount() + i], menu_extra_names[i]);
     }
     showUi(ui);
-    PB_SmartKnobConfig config = makeListConfig("Menu", appCount() + MENU_EXTRA_COUNT, selected, ++nav_nonce_);
+    PB_SmartKnobConfig config = makeListConfig("Menu", menuAppCount() + MENU_EXTRA_COUNT, selected, ++nav_nonce_);
     applyConfig(config, false);
 }
 
@@ -1209,11 +1444,11 @@ void InterfaceTask::navSelect() {
     int32_t sel = selectedIndex();
     switch (nav_screen_) {
         case NavScreen::APPS_LIST:
-            if (sel < appCount()) {
-                openApp(sel);
-            } else if (sel == appCount() + MENU_SETTINGS) {
+            if (sel < menuAppCount()) {
+                openApp(menu_apps_[sel]);
+            } else if (sel == menuAppCount() + MENU_SETTINGS) {
                 openSettingsList(0);
-            } else if (sel == appCount() + MENU_SLEEP) {
+            } else if (sel == menuAppCount() + MENU_SLEEP) {
                 // Screen off; any touch, turn or button press wakes it
                 log("Sleep: screen off (from the menu)");
                 last_activity_ms_ = millis() - SLEEP_SCREEN_OFF_MS;
@@ -1288,7 +1523,7 @@ void InterfaceTask::navBack() {
             }
             break;
         case NavScreen::SETTINGS_LIST:
-            openAppsList(appCount() + MENU_SETTINGS);  // back to the main menu, on Settings
+            openAppsList(menuAppCount() + MENU_SETTINGS);  // back to the main menu, on Settings
             break;
         case NavScreen::APPS_LIST:
             openApp(current_app_);
@@ -1481,6 +1716,6 @@ void InterfaceTask::leaveChargingMode() {
         ble_.begin("SmartKnob");
     #endif
     noteActivity();
-    openApp(settings_.app < appCount() ? settings_.app : 0);
+    openApp(menuIndexOf(settings_.app) >= 0 ? settings_.app : (menu_apps_.empty() ? 0 : menu_apps_[0]));
     sendStatus();
 }

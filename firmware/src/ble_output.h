@@ -20,6 +20,8 @@ class BleOutput {
         void volumeSteps(int32_t steps, bool fine);  // fine = Shift+Option quarter steps (macOS)
         void scrollSteps(int32_t steps);             // mouse wheel ticks
         void arrowSteps(int32_t steps);              // right / left arrow keys
+        // A keyboard shortcut (HID modifier bits + key code), pressed `times` times
+        void sendKey(uint8_t modifiers, uint8_t key, int32_t times = 1);
 
         // Forget every paired Mac/iPad (they'll need to pair again)
         void forgetAllDevices();

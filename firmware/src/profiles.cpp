@@ -14,7 +14,22 @@
 //   detents      - list of values with clicks (only these click; "magnetic")
 //   bias         - snap point bias
 //   hue          - LED color (unused on the MaTouch)
-// "turn": "volume" | "scroll" | "arrows" | "none"
+// "turn": "volume" | "scroll" | "arrows" | "none", or keys: { "cw": "=", "ccw": "-" }
+// "rim":  keys for sliding around the screen edge: { "cw": "=", "ccw": "-" }
+// "enter": a key sent when you change to this page or mode
+// Gestures: "tap", "double_tap", "triple_tap", "long_press", "swipe_left", "swipe_right",
+//   "swipe_up", "swipe_down": a key ("p", "shift+]"...) or "next_page", "next_module",
+//   "prev_module", "next_mode", "prev_mode"
+// "pick": [ { "label": "Red", "key": "6" }, ... ] makes a picker page
+// "display": "spring" (speed meter) or "direction" (flashing arrow) for the control screen
+// "show_value": false hides the number, "ring": false hides the ring,
+// "hints": { "left": "Reject", "right": "Pick", "up": "Label", "down": "Stars" } at the edges
+// "turn": { "param": "Exposure2012", "step": 0.05 } = the Mac adjusts it (Lightroom plugin)
+// Actions "link:reset" etc. are carried out by the Mac
+// Mode "tools": [ "masking" ] = opens by itself while that tool is in use
+// Mode "module": "develop" = opens by itself when the Mac reports that module (Lightroom)
+// Profile "title_in_center": true = the profile name sits in the middle, not at the top
+// Profile "menu": false = not listed in the menu (program profiles the Mac app opens)
 
 #if SK_BLE
 static const char MAC_PROFILE[] = R"JSON(
@@ -22,17 +37,91 @@ static const char MAC_PROFILE[] = R"JSON(
   "name": "Mac",
   "modes": [
     { "name": "Volume", "modules": [ { "name": "Volume", "pages": [
-      { "label": "Volume", "turn": "volume",
+      { "label": "Volume", "turn": "volume", "swipe_left": "next_mode", "swipe_right": "prev_mode",
         "feel": { "min": 0, "max": 64, "start": 32, "step_deg": 5, "detent": 0.8 } } ] } ] },
     { "name": "Scroll", "modules": [ { "name": "Scroll", "pages": [
-      { "label": "Scroll", "turn": "scroll",
+      { "label": "Scroll", "turn": "scroll", "swipe_left": "next_mode", "swipe_right": "prev_mode",
+        "display": "spring",
         "feel": { "min": 0, "max": 0, "step_deg": 60 } } ] } ] },
     { "name": "Arrows", "modules": [ { "name": "Arrows", "pages": [
-      { "label": "Arrows", "sub": "Left / Right", "turn": "arrows",
+      { "label": "Arrows", "sub": "Left / Right", "turn": "arrows", "swipe_left": "next_mode", "swipe_right": "prev_mode",
+        "display": "direction", "ring": false,
         "feel": { "step_deg": 15, "detent": 1 } } ] } ] }
   ]
 }
 )JSON";
+#endif
+
+#if SK_BLE
+// Lightroom Classic, using its own keyboard shortcuts (no plugin yet)
+static const char LIGHTROOM_PROFILE[] = R"JSON(
+{
+  "name": "Lightroom",
+  "menu": false,
+  "title_in_center": true,
+  "modes": [
+    { "name": "Library", "module": "library", "modules": [
+      { "name": "Library", "pages": [
+        { "label": "Grid", "enter": "g",
+          "turn": { "cw": "right", "ccw": "left" }, "rim": { "cw": "=", "ccw": "-" },
+          "tap": "next_page", "swipe_left": "x", "swipe_right": "p", "long_press": "u",
+          "show_value": false, "ring": false,
+          "hints": { "left": "Reject", "right": "Pick", "up": "Color", "down": "Rating" },
+          "feel": { "step_deg": 15, "detent": 1 } },
+        { "label": "Loupe", "enter": "e",
+          "turn": { "cw": "right", "ccw": "left" }, "rim": { "cw": "cmd+=", "ccw": "cmd+-" },
+          "tap": "next_page", "swipe_left": "x", "swipe_right": "p", "long_press": "u",
+          "show_value": false, "ring": false,
+          "hints": { "left": "Reject", "right": "Pick", "up": "Color", "down": "Rating" },
+          "feel": { "step_deg": 15, "detent": 1 } } ] },
+      { "name": "Color", "pages": [
+        { "label": "Color", "pick": [
+          { "label": "Red", "key": "6" }, { "label": "Yellow", "key": "7" },
+          { "label": "Green", "key": "8" }, { "label": "Blue", "key": "9" },
+          { "label": "Purple", "key": "link:label:Purple" } ] } ] },
+      { "name": "Rating", "pages": [
+        { "label": "Rating", "pick": [
+          { "label": "No stars", "key": "0" }, { "label": "1 star", "key": "1" },
+          { "label": "2 stars", "key": "2" }, { "label": "3 stars", "key": "3" },
+          { "label": "4 stars", "key": "4" }, { "label": "5 stars", "key": "5" } ] } ] } ] },
+    { "name": "Develop", "module": "develop", "modules": [
+      { "name": "Exposure", "pages": [ { "label": "Exposure", "enter": "d", "turn": { "param": "Exposure2012" }, "tap": "link:reset",
+          "feel": { "step_deg": 4, "detent": 0.4 } } ] },
+      { "name": "Contrast", "pages": [ { "label": "Contrast", "enter": "d", "turn": { "param": "Contrast2012" }, "tap": "link:reset",
+          "feel": { "step_deg": 4, "detent": 0.4 } } ] },
+      { "name": "Highlights", "pages": [ { "label": "Highlights", "enter": "d", "turn": { "param": "Highlights2012" }, "tap": "link:reset",
+          "feel": { "step_deg": 4, "detent": 0.4 } } ] },
+      { "name": "Shadows", "pages": [ { "label": "Shadows", "enter": "d", "turn": { "param": "Shadows2012" }, "tap": "link:reset",
+          "feel": { "step_deg": 4, "detent": 0.4 } } ] },
+      { "name": "Whites", "pages": [ { "label": "Whites", "enter": "d", "turn": { "param": "Whites2012" }, "tap": "link:reset",
+          "feel": { "step_deg": 4, "detent": 0.4 } } ] },
+      { "name": "Blacks", "pages": [ { "label": "Blacks", "enter": "d", "turn": { "param": "Blacks2012" }, "tap": "link:reset",
+          "feel": { "step_deg": 4, "detent": 0.4 } } ] },
+      { "name": "Temp", "pages": [ { "label": "Temp", "enter": "d", "turn": { "param": "Temperature" }, "tap": "link:reset",
+          "feel": { "step_deg": 4, "detent": 0.4 } } ] },
+      { "name": "Tint", "pages": [ { "label": "Tint", "enter": "d", "turn": { "param": "Tint" }, "tap": "link:reset",
+          "feel": { "step_deg": 4, "detent": 0.4 } } ] },
+      { "name": "Texture", "pages": [ { "label": "Texture", "enter": "d", "turn": { "param": "Texture" }, "tap": "link:reset",
+          "feel": { "step_deg": 4, "detent": 0.4 } } ] },
+      { "name": "Clarity", "pages": [ { "label": "Clarity", "enter": "d", "turn": { "param": "Clarity2012" }, "tap": "link:reset",
+          "feel": { "step_deg": 4, "detent": 0.4 } } ] },
+      { "name": "Dehaze", "pages": [ { "label": "Dehaze", "enter": "d", "turn": { "param": "Dehaze" }, "tap": "link:reset",
+          "feel": { "step_deg": 4, "detent": 0.4 } } ] },
+      { "name": "Vibrance", "pages": [ { "label": "Vibrance", "enter": "d", "turn": { "param": "Vibrance" }, "tap": "link:reset",
+          "feel": { "step_deg": 4, "detent": 0.4 } } ] },
+      { "name": "Saturation", "pages": [ { "label": "Saturation", "enter": "d", "turn": { "param": "Saturation" }, "tap": "link:reset",
+          "feel": { "step_deg": 4, "detent": 0.4 } } ] } ] },
+    { "name": "Brush", "tools": [ "masking", "dust", "localized" ], "modules": [ { "name": "Brush", "pages": [
+      { "label": "Brush size",
+        "turn": { "cw": "]", "ccw": "[" },
+        "feel": { "step_deg": 8, "detent": 0.6 } },
+      { "label": "Feather",
+        "turn": { "cw": "shift+]", "ccw": "shift+[" },
+        "feel": { "step_deg": 8, "detent": 0.6 } } ] } ] }
+  ]
+}
+)JSON";
+
 #endif
 
 // Scott Bezek's original haptic demos, one per mode
@@ -74,6 +163,69 @@ static const char DEMO_PROFILE[] = R"JSON(
 }
 )JSON";
 
+// ---------------- Keys ----------------
+
+bool parseKeyCombo(const char* text, KeyCombo& out) {
+    out = KeyCombo();
+    String s(text);
+    s.toLowerCase();
+    s.trim();
+    if (s.length() == 0) {
+        return false;
+    }
+    // Modifiers come first, each followed by "+"
+    int start = 0;
+    while (true) {
+        int plus = s.indexOf('+', start);
+        if (plus < 0 || plus == (int)s.length() - 1) {
+            break;
+        }
+        String mod = s.substring(start, plus);
+        if (mod == "shift") out.modifiers |= 0x02;
+        else if (mod == "ctrl" || mod == "control") out.modifiers |= 0x01;
+        else if (mod == "alt" || mod == "opt" || mod == "option") out.modifiers |= 0x04;
+        else if (mod == "cmd" || mod == "command") out.modifiers |= 0x08;
+        else return false;
+        start = plus + 1;
+    }
+    String k = s.substring(start);
+
+    if (k.length() == 1) {
+        char c = k[0];
+        if (c >= 'a' && c <= 'z') out.key = 0x04 + (c - 'a');
+        else if (c >= '1' && c <= '9') out.key = 0x1e + (c - '1');
+        else if (c == '0') out.key = 0x27;
+        else {
+            static const char punct[] = "-=[]\\;'`,./";
+            static const uint8_t codes[] = {0x2d, 0x2e, 0x2f, 0x30, 0x31, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38};
+            const char* found = strchr(punct, c);
+            if (found == nullptr) return false;
+            out.key = codes[found - punct];
+        }
+        return true;
+    }
+    struct Named { const char* name; uint8_t code; };
+    static const Named named[] = {
+        {"right", 0x4f}, {"left", 0x50}, {"down", 0x51}, {"up", 0x52},
+        {"space", 0x2c}, {"enter", 0x28}, {"return", 0x28}, {"esc", 0x29}, {"tab", 0x2b},
+        {"delete", 0x2a}, {"backspace", 0x2a},
+    };
+    for (const Named& n : named) {
+        if (k == n.name) {
+            out.key = n.code;
+            return true;
+        }
+    }
+    if (k[0] == 'f') {
+        int n = k.substring(1).toInt();
+        if (n >= 1 && n <= 12) {
+            out.key = 0x3a + (n - 1);
+            return true;
+        }
+    }
+    return false;
+}
+
 // ---------------- Reading JSON ----------------
 
 static TurnOutput parseTurn(const char* s) {
@@ -105,6 +257,46 @@ static PB_SmartKnobConfig parseFeel(JsonObjectConst feel, const String& text) {
     return c;
 }
 
+// Read an optional key field; a field that's there but not a key we know is an error
+static bool readKey(JsonVariantConst value, KeyCombo& out, String& error) {
+    if (value.isNull()) {
+        return true;
+    }
+    const char* text = value.as<const char*>();
+    if (text == nullptr || !parseKeyCombo(text, out)) {
+        error = String("unknown key '") + (text ? text : "?") + "'";
+        return false;
+    }
+    return true;
+}
+
+// A gesture: a named move, or a key
+static bool readAction(JsonVariantConst value, Action& out, String& error) {
+    if (value.isNull()) {
+        return true;
+    }
+    const char* text = value.as<const char*>();
+    struct Named { const char* name; ActionKind kind; };
+    static const Named named[] = {
+        {"next_page", ActionKind::NEXT_PAGE}, {"next_module", ActionKind::NEXT_MODULE},
+        {"prev_module", ActionKind::PREV_MODULE}, {"next_mode", ActionKind::NEXT_MODE},
+        {"prev_mode", ActionKind::PREV_MODE},
+    };
+    for (const Named& n : named) {
+        if (text != nullptr && strcmp(text, n.name) == 0) {
+            out.kind = n.kind;
+            return true;
+        }
+    }
+    if (text != nullptr && strncmp(text, "link:", 5) == 0) {
+        out.kind = ActionKind::LINK;   // e.g. "link:reset", carried out by the Mac
+        out.name = text + 5;
+        return true;
+    }
+    out.kind = ActionKind::KEY;
+    return readKey(value, out.key, error);
+}
+
 bool parseProfile(const char* json, Profile& out, String& error) {
     JsonDocument doc;
     DeserializationError err = deserializeJson(doc, json);
@@ -118,9 +310,15 @@ bool parseProfile(const char* json, Profile& out, String& error) {
         error = "no name";
         return false;
     }
+    out.in_menu = doc["menu"] | true;
+    out.title_in_center = doc["title_in_center"] | false;
     for (JsonObjectConst m : doc["modes"].as<JsonArrayConst>()) {
         ProfileMode mode;
         mode.name = m["name"] | "";
+        mode.module = m["module"] | "";
+        for (JsonVariantConst tool : m["tools"].as<JsonArrayConst>()) {
+            mode.tools.push_back(tool.as<const char*>());
+        }
         for (JsonObjectConst mod : m["modules"].as<JsonArrayConst>()) {
             ProfileModule module;
             module.name = mod["name"] | "";
@@ -128,7 +326,46 @@ bool parseProfile(const char* json, Profile& out, String& error) {
                 ProfilePage page;
                 page.label = p["label"] | "";
                 page.sub = p["sub"] | "";
-                page.turn = parseTurn(p["turn"].as<const char*>());
+                if (p["turn"]["param"].is<const char*>()) {
+                    page.turn = TurnOutput::LINK;
+                    page.param = p["turn"]["param"].as<const char*>();
+                    page.step = p["turn"]["step"] | 0.0f;
+                } else if (p["turn"].is<JsonObjectConst>()) {
+                    page.turn = TurnOutput::KEYS;
+                    if (!readKey(p["turn"]["cw"], page.turn_cw, error)) return false;
+                    if (!readKey(p["turn"]["ccw"], page.turn_ccw, error)) return false;
+                } else {
+                    page.turn = parseTurn(p["turn"].as<const char*>());
+                }
+                if (!readKey(p["rim"]["cw"], page.rim_cw, error)) return false;
+                if (!readKey(p["rim"]["ccw"], page.rim_ccw, error)) return false;
+                if (!readKey(p["enter"], page.enter, error)) return false;
+                if (!readAction(p["tap"], page.tap, error)) return false;
+                if (!readAction(p["double_tap"], page.double_tap, error)) return false;
+                if (!readAction(p["triple_tap"], page.triple_tap, error)) return false;
+                if (!readAction(p["long_press"], page.long_press, error)) return false;
+                if (!readAction(p["swipe_left"], page.swipe_left, error)) return false;
+                if (!readAction(p["swipe_right"], page.swipe_right, error)) return false;
+                if (!readAction(p["swipe_up"], page.swipe_up, error)) return false;
+                if (!readAction(p["swipe_down"], page.swipe_down, error)) return false;
+                for (JsonObjectConst o : p["pick"].as<JsonArrayConst>()) {
+                    PickOption option;
+                    option.label = o["label"] | "";
+                    if (!readAction(o["key"], option.action, error)) return false;
+                    page.pick.push_back(option);
+                }
+                page.show_value = p["show_value"] | true;
+                const char* display = p["display"] | "";
+                page.display = strcmp(display, "spring") == 0 ? 1 : (strcmp(display, "direction") == 0 ? 2 : 0);
+                page.show_ring = p["ring"] | true;
+                page.hint_left = p["hints"]["left"] | "";
+                page.hint_right = p["hints"]["right"] | "";
+                page.hint_up = p["hints"]["up"] | "";
+                page.hint_down = p["hints"]["down"] | "";
+                if (page.pick.size() > 8) {
+                    error = "a picker can have at most 8 choices";
+                    return false;
+                }
                 String text = page.sub.length() > 0 ? page.label + "\n" + page.sub : page.label;
                 page.feel = parseFeel(p["feel"].as<JsonObjectConst>(), text);
                 module.pages.push_back(page);
@@ -148,6 +385,7 @@ void loadBuiltinProfiles(std::vector<Profile>& out, std::function<void(const cha
     const char* builtins[] = {
     #if SK_BLE
         MAC_PROFILE,
+        LIGHTROOM_PROFILE,
     #endif
         DEMO_PROFILE,
     };
@@ -157,7 +395,7 @@ void loadBuiltinProfiles(std::vector<Profile>& out, std::function<void(const cha
         if (parseProfile(json, profile, error)) {
             out.push_back(profile);
         } else if (log != nullptr) {
-            log((String("Profile error: ") + error).c_str());
+            log((String("Profile error: ") + error).c_str());  // e.g. "unknown key 'shft+]'"
         }
     }
 }

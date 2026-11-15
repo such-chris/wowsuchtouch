@@ -28,6 +28,7 @@ class DisplayTask : public Task<DisplayTask> {
         void showScreen(const UiScreen& screen);
         void showStatus(const UiStatus& status);
         void showToast(const UiToast& toast);
+        void showValueText(const char* text);
         void setLogger(Logger* logger);
 
     protected:
@@ -40,6 +41,8 @@ class DisplayTask : public Task<DisplayTask> {
         QueueHandle_t ui_screen_queue_;
         QueueHandle_t ui_status_queue_;
         QueueHandle_t ui_toast_queue_;
+        QueueHandle_t ui_value_queue_;
+        char value_text_[16] = {};   // from the Mac; replaces the number while set
 
         SemaphoreHandle_t mutex_;
         uint16_t brightness_;
@@ -51,6 +54,8 @@ class DisplayTask : public Task<DisplayTask> {
         lv_obj_t* fill_arc_ = nullptr;    // bright arc from the start of the range to the value
         lv_obj_t* dot_ = nullptr;         // marker at the current position
         lv_obj_t* value_label_ = nullptr;  // big number (control and value layouts)
+        lv_obj_t* hint_labels_[4] = {};
+        lv_obj_t* end_marks_[2] = {};    // spring style: the two ends of the throw  // left, right, up, down
         lv_obj_t* text_label_ = nullptr;   // mode name (control layout)
         lv_obj_t* title_label_ = nullptr;  // small heading (list and value layouts)
         lv_obj_t* list_box_ = nullptr;     // list: column of items that slides with the knob

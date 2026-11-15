@@ -65,6 +65,9 @@ DisplayTask::DisplayTask(const uint8_t task_core) : Task{"Display", 8192, 1, tas
     ui_toast_queue_ = xQueueCreate(1, sizeof(UiToast));
     assert(ui_toast_queue_ != NULL);
 
+    ui_value_queue_ = xQueueCreate(1, sizeof(UiValueText));
+    assert(ui_value_queue_ != NULL);
+
     mutex_ = xSemaphoreCreateMutex();
     assert(mutex_ != NULL);
 }
@@ -74,6 +77,7 @@ DisplayTask::~DisplayTask() {
     vQueueDelete(ui_screen_queue_);
     vQueueDelete(ui_status_queue_);
     vQueueDelete(ui_toast_queue_);
+    vQueueDelete(ui_value_queue_);
     vSemaphoreDelete(mutex_);
 }
 
@@ -104,6 +108,13 @@ void DisplayTask::run() {
             updateScreen(last_state_);
         }
         if (xQueueReceive(knob_state_queue_, &last_state_, 0) == pdTRUE) {
+            updateScreen(last_state_);
+        }
+        UiValueText value_text;
+        if (xQueueReceive(ui_value_queue_, &value_text, 0) == pdTRUE) {
+            memcpy(value_text_, value_text.text, sizeof(value_text_));
+            value_text_[sizeof(value_text_) - 1] = 0;
+            shown_value_ = INT32_MIN;  // redraw
             updateScreen(last_state_);
         }
 
@@ -186,6 +197,28 @@ void DisplayTask::buildScreen() {
     lv_obj_set_style_text_align(text_label_, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(text_label_, LV_ALIGN_CENTER, 0, 40);
     lv_label_set_text(text_label_, "");
+
+    // Spring style: small marks at the two ends of the throw
+    for (int i = 0; i < 2; i++) {
+        lv_obj_t* mark = lv_obj_create(screen);
+        lv_obj_remove_style_all(mark);
+        lv_obj_set_size(mark, 8, 8);
+        lv_obj_set_style_radius(mark, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_bg_color(mark, lv_color_hex(COLOR_TEXT_DIM), 0);
+        lv_obj_set_style_bg_opa(mark, LV_OPA_COVER, 0);
+        lv_obj_add_flag(mark, LV_OBJ_FLAG_HIDDEN);
+        end_marks_[i] = mark;
+    }
+
+    // Swipe hints at the edges (left, right, up, down)
+    for (int i = 0; i < 4; i++) {
+        lv_obj_t* hint = lv_label_create(screen);
+        lv_obj_set_style_text_font(hint, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(hint, lv_color_hex(COLOR_TEXT_DIM), 0);
+        lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_text(hint, "");
+        hint_labels_[i] = hint;
+    }
 
     // Heading for lists and settings
     title_label_ = lv_label_create(screen);
@@ -277,7 +310,33 @@ void DisplayTask::applyLayout() {
     bool value = ui_.layout == UiLayout::VALUE;
 
     setVisible(text_label_, control);
-    setVisible(value_label_, control || (value && ui_.show_number));
+    setVisible(value_label_, (control && !ui_.hide_value) || (value && ui_.show_number));
+
+    // Swipe hints: arrow + word at each edge
+    const char* hints[4] = {ui_.hint_left, ui_.hint_right, ui_.hint_up, ui_.hint_down};
+    for (int i = 0; i < 4; i++) {
+        bool show = control && hints[i][0] != 0;
+        setVisible(hint_labels_[i], show);
+        if (!show) continue;
+        switch (i) {
+            case 0:
+                lv_label_set_text(hint_labels_[i], hints[i]);
+                lv_obj_align(hint_labels_[i], LV_ALIGN_LEFT_MID, 6, 0);
+                break;
+            case 1:
+                lv_label_set_text(hint_labels_[i], hints[i]);
+                lv_obj_align(hint_labels_[i], LV_ALIGN_RIGHT_MID, -6, 0);
+                break;
+            case 2:
+                lv_label_set_text(hint_labels_[i], hints[i]);
+                lv_obj_align(hint_labels_[i], LV_ALIGN_TOP_MID, 0, 14);
+                break;
+            default:
+                lv_label_set_text(hint_labels_[i], hints[i]);
+                lv_obj_align(hint_labels_[i], LV_ALIGN_BOTTOM_MID, 0, -14);
+                break;
+        }
+    }
     setVisible(title_label_, true);  // app name on control screens, heading elsewhere
     setVisible(list_box_, list);
     setVisible(info_label_, value && !ui_.show_number);
@@ -298,6 +357,13 @@ void DisplayTask::applyLayout() {
         lv_label_set_text_fmt(info_label_, "%s\n%s", ui_.line1, ui_.line2);
     }
     lv_obj_align(value_label_, LV_ALIGN_CENTER, 0, control ? -18 : 6);
+    // With no number, the page name sits in the middle
+    lv_obj_align(text_label_, LV_ALIGN_CENTER, 0, ui_.hide_value ? 0 : 40);
+
+    value_text_[0] = 0;  // a new screen starts without the Mac's value
+    // The direction style fades the number; start every screen fully visible
+    lv_anim_delete(value_label_, NULL);
+    lv_obj_set_style_opa(value_label_, LV_OPA_COVER, 0);
 
     // Force text to be redrawn for the new layout
     shown_value_ = INT32_MIN;
@@ -355,6 +421,36 @@ void DisplayTask::updateScreen(const PB_SmartKnobState& state) {
         lv_obj_add_flag(track_arc_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(fill_arc_, LV_OBJ_FLAG_HIDDEN);
     }
+    // Spring style: the track is one full throw either side of the middle, and the
+    // fill grows from the middle the way you push (a speed meter)
+    bool spring = ui_.layout == UiLayout::CONTROL && ui_.control_style == UiControlStyle::SPRING;
+    if (spring) {
+        float low = middle_angle - width_degrees;
+        float high = middle_angle + width_degrees;
+        lv_obj_remove_flag(track_arc_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(fill_arc_, LV_OBJ_FLAG_HIDDEN);
+        lv_arc_set_bg_angles(track_arc_, wrapDegrees(low), wrapDegrees(high));
+        float to = CLAMP(dot_angle, low, high);
+        if (to >= middle_angle) {
+            lv_arc_set_angles(fill_arc_, wrapDegrees(middle_angle), wrapDegrees(to));
+        } else {
+            lv_arc_set_angles(fill_arc_, wrapDegrees(to), wrapDegrees(middle_angle));
+        }
+        for (int i = 0; i < 2; i++) {
+            float r = (i == 0 ? low : high) * PI / 180;
+            lv_obj_set_pos(end_marks_[i], CENTER + (int32_t)(RING_RADIUS * cosf(r)) - 4,
+                                          CENTER + (int32_t)(RING_RADIUS * sinf(r)) - 4);
+        }
+    }
+    for (int i = 0; i < 2; i++) {
+        setVisible(end_marks_[i], spring);
+    }
+
+    if (ui_.hide_ring) {
+        lv_obj_add_flag(track_arc_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(fill_arc_, LV_OBJ_FLAG_HIDDEN);
+    }
+    setVisible(dot_, !ui_.hide_ring);
 
     // Dot on the ring
     float radians = dot_angle * PI / 180;
@@ -409,8 +505,38 @@ void DisplayTask::updateScreen(const PB_SmartKnobState& state) {
         return;
     }
 
-    // Control layout: value (only redraw when it changes)
-    if (state.current_position != shown_value_) {
+    // Control layout: value (only redraw when it changes). Text from the Mac
+    // (e.g. Lightroom's real slider value) replaces the knob's own count.
+    if (ui_.control_style == UiControlStyle::SPRING) {
+        // Arrow the way it scrolls, brighter the faster (clockwise scrolls down)
+        float deflection = (state.current_position - config.min_position) + state.sub_position_unit;
+        const char* arrow = deflection > 0.08f ? LV_SYMBOL_DOWN : (deflection < -0.08f ? LV_SYMBOL_UP : "");
+        int32_t shown = deflection > 0.08f ? 1 : (deflection < -0.08f ? -1 : 0);
+        if (shown != shown_value_) {
+            shown_value_ = shown;
+            lv_label_set_text(value_label_, arrow);
+        }
+        float strength = CLAMP(fabsf(deflection), 0.0f, 1.0f);
+        lv_obj_set_style_opa(value_label_, (lv_opa_t)(70 + 185 * strength), 0);
+    } else if (ui_.control_style == UiControlStyle::DIRECTION) {
+        // Each click flashes an arrow the way you turned, then it fades
+        if (state.current_position != shown_value_) {
+            if (shown_value_ != INT32_MIN) {
+                lv_label_set_text(value_label_, state.current_position > shown_value_ ? LV_SYMBOL_RIGHT : LV_SYMBOL_LEFT);
+                lv_anim_delete(value_label_, NULL);
+                lv_obj_set_style_opa(value_label_, LV_OPA_COVER, 0);
+                lv_obj_fade_out(value_label_, 400, 80);
+            } else {
+                lv_label_set_text(value_label_, "");
+            }
+            shown_value_ = state.current_position;
+        }
+    } else if (value_text_[0] != 0) {
+        if (shown_value_ != INT32_MIN + 1) {
+            shown_value_ = INT32_MIN + 1;
+            lv_label_set_text(value_label_, value_text_);
+        }
+    } else if (state.current_position != shown_value_) {
         shown_value_ = state.current_position;
         lv_label_set_text_fmt(value_label_, "%d", (int)state.current_position);
     }
@@ -432,6 +558,12 @@ void DisplayTask::showScreen(const UiScreen& screen) {
 
 void DisplayTask::showStatus(const UiStatus& status) {
     xQueueOverwrite(ui_status_queue_, &status);
+}
+
+void DisplayTask::showValueText(const char* text) {
+    UiValueText value;
+    strncpy(value.text, text, sizeof(value.text) - 1);
+    xQueueOverwrite(ui_value_queue_, &value);
 }
 
 void DisplayTask::showToast(const UiToast& toast) {
