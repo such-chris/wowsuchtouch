@@ -760,10 +760,15 @@ void InterfaceTask::updateTouch() {
     uint16_t x = 0, y = 0;
     bool touching = touch_.read(x, y);
 
-    // Charging screen: touches just wake the display
+    // Charging screen: a tap turns the screen off / back on
     if (charging_mode_) {
-        if (touching) {
-            noteActivity();
+        if (touch_gestures_.update(touching, x, y, now) == TouchGesture::TAP) {
+            if (sleep_stage_ == 2) {
+                noteActivity();  // wake
+            } else {
+                last_activity_ms_ = millis() - SLEEP_SCREEN_OFF_MS;  // straight to screen off
+                updateSleep();
+            }
         }
         return;
     }
@@ -1565,10 +1570,18 @@ void InterfaceTask::showChargingScreen() {
 }
 
 void InterfaceTask::leaveChargingMode() {
-    // Restart into normal use. A restart by the firmware itself always starts
-    // normally and holds the power on, so it keeps running if unplugged later.
+    // Switch to normal use right here (no restart): hold the power on so it
+    // keeps running when unplugged, start Bluetooth and open the last app
     log("Starting up from the charging screen");
-    saveSettings();
-    delay(100);
-    ESP.restart();
+    charging_mode_ = false;
+    #ifdef PIN_POWER_HOLD
+        digitalWrite(PIN_POWER_HOLD, HIGH);
+    #endif
+    motor_task_.setRelaxed(false);
+    #if SK_BLE
+        ble_.begin("SmartKnob");
+    #endif
+    noteActivity();
+    openApp(settings_.app < APP_COUNT ? settings_.app : 0);
+    sendStatus();
 }

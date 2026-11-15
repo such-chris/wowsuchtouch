@@ -158,7 +158,8 @@ Library: ESP32-BLE-CompositeHID v0.4.0 (NimBLE).
 
 - **On (battery):** hold the Function button 1-2 s until the screen lights, then let go.
 - **Plugging in a charger while it's off** wakes it to a **charging screen** (battery %, or "Charged").
-  It doesn't hold the power on, so unplugging switches it back off. Press the Function button to start
+  Tap the screen to turn it off / on. It doesn't hold the power on, so unplugging switches it back off.
+  Press the Function button to start
   normally. Works with wall chargers too: it's the power arriving that wakes it (`main.cpp` checks
   for a fresh power-up with the button not held).
 - **Off:** hold the Function button 2 s, then let go. On USB the knob can't switch itself off
