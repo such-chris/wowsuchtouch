@@ -35,6 +35,26 @@ void SerialProtocolPlaintext::loop() {
             }
             break;
         }
+
+        // A message line: collect everything up to the end of the line
+        if (in_json_line_) {
+            if (b == '\n' || b == '\r') {
+                in_json_line_ = false;
+                if (json_line_callback_) {
+                    json_line_callback_(json_line_.c_str());
+                }
+                json_line_ = "";
+            } else if (json_line_.length() < 4096) {
+                json_line_ += (char)b;
+            }
+            continue;
+        }
+        if (b == '{') {
+            in_json_line_ = true;
+            json_line_ = "{";
+            continue;
+        }
+
         if (b == ' ') {
             if (demo_config_change_callback_) {
                 demo_config_change_callback_();

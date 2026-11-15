@@ -239,6 +239,9 @@ void InterfaceTask::run() {
     sendStatus();
     motor_task_.addListener(knob_state_queue_);
 
+    plaintext_protocol_.setJsonLineCallback([this] (const char* line) {
+        handleLinkMessage(line);
+    });
     plaintext_protocol_.init([this] () {
         changeConfig(true);
     }, [this] () {
@@ -408,6 +411,101 @@ void InterfaceTask::nextPage() {
     }
     current_page_ = wrapIndex(current_page_ + 1, module.pages.size());
     applyAppPage();
+}
+
+int InterfaceTask::findProfile(const char* name) {
+    for (int i = 0; i < appCount(); i++) {
+        if (profiles_[i].name.equalsIgnoreCase(name)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+// ======================= Link (Mac app messages) =======================
+//
+// Mac -> knob:  {"t":"hello"}
+//               {"t":"switch","p":"Demo"}       open a profile (the program in front changed)
+// Knob -> Mac:  {"t":"hello","fw":"0.2.0","profiles":["Mac","Demo"],"p":"Mac"}
+//               {"t":"where","p":"Mac","mode":"Volume","module":"Volume","page":"Volume"}
+//               {"t":"ok"}  /  {"t":"err","msg":"..."}
+
+void InterfaceTask::handleLinkMessage(const char* line) {
+    JsonDocument doc;
+    if (deserializeJson(doc, line)) {
+        sendLinkResult("bad JSON");
+        return;
+    }
+    const char* type = doc["t"] | "";
+
+    if (strcmp(type, "hello") == 0) {
+        sendHello();
+    } else if (strcmp(type, "switch") == 0) {
+        const char* name = doc["p"] | "";
+        int index = findProfile(name);
+        if (index < 0) {
+            sendLinkResult("no such profile");
+            return;
+        }
+        if (index != current_app_) {
+            if (nav_screen_ == NavScreen::APP) {
+                openApp(index);
+                toast(profiles_[index].name.c_str());
+            } else {
+                // In a menu: don't pull you out; the Function button returns to the new profile
+                current_app_ = index;
+                settings_.app = index;
+                current_mode_ = current_module_ = current_page_ = 0;
+            }
+        }
+        sendLinkResult(nullptr);
+    } else {
+        sendLinkResult("unknown message");
+    }
+}
+
+void InterfaceTask::sendLink(JsonDocument& doc) {
+    // Only in plaintext mode (the binary protocol owns the line otherwise)
+    if (current_protocol_ != &plaintext_protocol_) {
+        return;
+    }
+    serializeJson(doc, stream_);
+    stream_.println();
+}
+
+void InterfaceTask::sendLinkResult(const char* error) {
+    JsonDocument doc;
+    if (error == nullptr) {
+        doc["t"] = "ok";
+    } else {
+        doc["t"] = "err";
+        doc["msg"] = error;
+    }
+    sendLink(doc);
+}
+
+void InterfaceTask::sendHello() {
+    JsonDocument doc;
+    doc["t"] = "hello";
+    doc["fw"] = FIRMWARE_VERSION;
+    JsonArray names = doc["profiles"].to<JsonArray>();
+    for (const Profile& profile : profiles_) {
+        names.add(profile.name);
+    }
+    doc["p"] = profiles_[current_app_].name;
+    sendLink(doc);
+}
+
+void InterfaceTask::sendWhere() {
+    const Profile& profile = profiles_[current_app_];
+    const ProfileMode& mode = profile.modes[current_mode_];
+    JsonDocument doc;
+    doc["t"] = "where";
+    doc["p"] = profile.name;
+    doc["mode"] = mode.name;
+    doc["module"] = mode.modules[current_module_].name;
+    doc["page"] = currentPage().label;
+    sendLink(doc);
 }
 
 void InterfaceTask::updateHardware() {
@@ -978,6 +1076,7 @@ void InterfaceTask::applyAppPage() {
     snprintf(buf_, sizeof(buf_), "%s: %s", profiles_[current_app_].name.c_str(), config.text);
     log(buf_);
     applyConfig(config, false);
+    sendWhere();
 }
 
 // Main menu: the apps, then Settings, Sleep and Power off

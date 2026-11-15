@@ -9,6 +9,7 @@
 
 typedef std::function<void(void)> DemoConfigChangeCallback;
 typedef std::function<void(void)> StrainCalibrationCallback;
+typedef std::function<void(const char*)> JsonLineCallback;
 
 class SerialProtocolPlaintext : public SerialProtocol {
     public:
@@ -19,6 +20,9 @@ class SerialProtocolPlaintext : public SerialProtocol {
         void handleState(const PB_SmartKnobState& state) override;
 
         void init(DemoConfigChangeCallback demo_config_change_callback, StrainCalibrationCallback strain_calibration_callback);
+
+        // Lines starting with "{" are messages from the Mac app (JSON), not key commands
+        void setJsonLineCallback(JsonLineCallback callback) { json_line_callback_ = callback; }
     
     private:
         Stream& stream_;
@@ -26,4 +30,7 @@ class SerialProtocolPlaintext : public SerialProtocol {
         PB_SmartKnobState latest_state_ = {};
         DemoConfigChangeCallback demo_config_change_callback_;
         StrainCalibrationCallback strain_calibration_callback_;
+        JsonLineCallback json_line_callback_;
+        String json_line_;
+        bool in_json_line_ = false;
 };

@@ -37,6 +37,7 @@
 #ifdef PIN_BATTERY_ADC
 #include "battery.h"
 #include "profiles.h"
+#include <ArduinoJson.h>
 #endif
 
 #ifndef SK_FORCE_UART_STREAM
@@ -141,6 +142,14 @@ class InterfaceTask : public Task<InterfaceTask>, public Logger {
         void changeConfig(bool next);   // next / previous mode
         void changeModule(bool next);   // next / previous module
         void nextPage();
+        int findProfile(const char* name);
+
+        // ---- Link: JSON messages with the Mac app (one per line, over USB for now) ----
+        void handleLinkMessage(const char* line);
+        void sendLink(JsonDocument& doc);
+        void sendLinkResult(const char* error);  // nullptr = ok
+        void sendHello();
+        void sendWhere();
 
         // ---- Navigation: apps, the apps list and settings ----
         enum class NavScreen { APP, APPS_LIST, SETTINGS_LIST, SETTING };
