@@ -98,14 +98,14 @@ Every gesture is printed in the monitor, e.g. `Touch: DOUBLE_TAP at (120, 98)`, 
 
 | Gesture | Where | Does |
 |---|---|---|
-| Swipe down from the top edge | anywhere | Settings |
-| Swipe up from the bottom edge | anywhere | Apps |
-| Long press (~0.6 s) | anywhere | Home (the Mac app) |
-| Tap / swipe left | in an app | next page (e.g. Volume -> Scroll) |
-| Double tap / swipe right | in an app | previous page |
+| Function button press | in an app | main menu (apps, Settings, Sleep, Power off) |
+| Function button press | in a menu | back to the app |
+| Function button hold (2 s) | anywhere | power off |
+| Swipe left / right | in an app | next / previous page (e.g. Volume -> Scroll) |
+| Tap, double tap, triple tap, long press, swipe up / down | in an app | free for app actions (tap = knob push) |
 | Turn the knob | in a menu | move through the list (one click per item) |
-| Tap | in a menu | open / choose |
-| Double tap / swipe right | in a menu | back |
+| Tap / swipe left | in a menu | open / choose |
+| Swipe right | in a menu | back |
 | Slide around the rim | anywhere | acts like turning the knob (Settings > Touch) |
 
 Single and double taps wait ~0.25 s to make sure another tap isn't coming.
@@ -176,6 +176,6 @@ Library: ESP32-BLE-CompositeHID v0.4.0 (NimBLE).
   idle on battery. Not while plugged into a computer. Times: `SLEEP_*` in `interface_task.cpp`.
 
 Code: `power_button.*` (short/long press), `battery.*` (voltage to percent), `updatePowerButton()` / `updateBattery()`
-in `interface_task.cpp`. A short press is free for a future action.
+in `interface_task.cpp`. A short press opens the main menu (or returns to the app).
 
 Not done yet: on-knob menu, long-press touch actions.

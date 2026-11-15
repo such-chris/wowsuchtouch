@@ -167,7 +167,7 @@ class InterfaceTask : public Task<InterfaceTask>, public Logger {
         void goHome();
         void openApp(int app);
         void applyAppPage();
-        void openAppsList();
+        void openAppsList(int selected);
         void openSettingsList(int selected);
         void openSetting(int item);
         void navSelect();   // tap in a menu

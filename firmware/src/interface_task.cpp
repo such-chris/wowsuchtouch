@@ -354,8 +354,9 @@ static const int SET_BT_DEVICES = SET_COUNT;
 // How long "Add device" lets new devices pair
 static const uint32_t PAIRING_WINDOW_MS = 120000;
 
-// How far from the top / bottom edge a swipe must start to open Settings / Apps (pixels)
-static const uint16_t EDGE_SWIPE_PX = 60;
+// Main menu: the apps, then these
+enum MenuExtra { MENU_SETTINGS = 0, MENU_SLEEP, MENU_POWER_OFF, MENU_EXTRA_COUNT };
+static const char* const menu_extra_names[MENU_EXTRA_COUNT] = { "Settings", "Sleep", "Power off" };
 
 // ---- Knob feel for menus ----
 // A list: one click per item. Looping lists have no end stops (past the last item
@@ -861,53 +862,24 @@ void InterfaceTask::updateTouch() {
         touchGestureName(gesture), touch_gestures_.gestureX(), touch_gestures_.gestureY());
     log(buf_);
 
-    // These work everywhere: edge swipes open Settings / Apps, long press goes Home
-    uint16_t start_y = touch_gestures_.gestureY();
-    if (gesture == TouchGesture::SWIPE_DOWN && start_y < EDGE_SWIPE_PX) {
-        motor_task_.playHaptic(false);
-        openSettingsList(0);
-        return;
-    }
-    if (gesture == TouchGesture::SWIPE_UP && start_y > TFT_HEIGHT - EDGE_SWIPE_PX) {
-        motor_task_.playHaptic(false);
-        openAppsList();
-        return;
-    }
-    if (gesture == TouchGesture::LONG_PRESS) {
-        motor_task_.playHaptic(true);  // felt while the finger is still down
-        goHome();
-        return;
-    }
-
+    // System controls live on the Function button; the touch screen belongs to the app,
+    // except inside menus (no app running there)
     if (nav_screen_ != NavScreen::APP) {
-        // In a menu: tap opens / chooses; double tap or swipe right goes back
-        if (gesture == TouchGesture::TAP) {
-            motor_task_.playHaptic(true);
+        if (gesture == TouchGesture::TAP || gesture == TouchGesture::SWIPE_LEFT) {
+            // Tap or swipe left: open / choose (forward)
+            motor_task_.playHaptic(gesture == TouchGesture::TAP);
             navSelect();
-        } else if (gesture == TouchGesture::DOUBLE_TAP) {
-            motor_task_.playHaptic(true);
-            delay(80);
-            motor_task_.playHaptic(true);
-            navBack();
         } else if (gesture == TouchGesture::SWIPE_RIGHT) {
+            // Swipe right: back
             motor_task_.playHaptic(false);
             navBack();
         }
         return;
     }
 
-    // In an app: tap / swipe left = next page, double tap / swipe right = previous page
+    // In an app: swipe left / right = next / previous page.
+    // Tap, double tap, triple tap, long press and swipes up / down are free for app actions.
     switch (gesture) {
-        case TouchGesture::TAP:
-            motor_task_.playHaptic(true);
-            changeConfig(true);
-            break;
-        case TouchGesture::DOUBLE_TAP:
-            motor_task_.playHaptic(true);
-            delay(80);
-            motor_task_.playHaptic(true);
-            changeConfig(false);
-            break;
         case TouchGesture::SWIPE_LEFT:
             motor_task_.playHaptic(false);
             changeConfig(true);
@@ -1017,8 +989,17 @@ void InterfaceTask::updatePowerButton() {
                 leaveChargingMode();
                 break;
             }
+            if (sleep_stage_ == 2) {
+                noteActivity();  // screen was off: just wake
+                break;
+            }
             noteActivity();
-            log("Button: short press (no action yet)");
+            motor_task_.playHaptic(true);
+            if (nav_screen_ == NavScreen::APP) {
+                openAppsList(current_app_);  // main menu
+            } else {
+                openApp(current_app_);       // back to the app
+            }
             break;
         case ButtonEvent::LONG_PRESS:
             if (charging_mode_) {
@@ -1199,17 +1180,23 @@ void InterfaceTask::applyAppPage() {
     applyConfig(configs[current_config_], false);
 }
 
-void InterfaceTask::openAppsList() {
+// Main menu: the apps, then Settings, Sleep and Power off
+void InterfaceTask::openAppsList(int selected) {
     setNavScreen(NavScreen::APPS_LIST);
     UiScreen ui;
     ui.layout = UiLayout::LIST;
-    copyText(ui.title, "Apps");
-    ui.item_count = APP_COUNT;
+    copyText(ui.title, "Menu");
+    ui.ring_at_bottom = true;
+    ui.show_status = true;
+    ui.item_count = APP_COUNT + MENU_EXTRA_COUNT;
     for (int i = 0; i < APP_COUNT; i++) {
         copyText(ui.items[i], apps[i].name);
     }
+    for (int i = 0; i < MENU_EXTRA_COUNT; i++) {
+        copyText(ui.items[APP_COUNT + i], menu_extra_names[i]);
+    }
     showUi(ui);
-    PB_SmartKnobConfig config = makeListConfig("Apps", APP_COUNT, current_app_, ++nav_nonce_);
+    PB_SmartKnobConfig config = makeListConfig("Menu", APP_COUNT + MENU_EXTRA_COUNT, selected, ++nav_nonce_);
     applyConfig(config, false);
 }
 
@@ -1219,7 +1206,6 @@ void InterfaceTask::openSettingsList(int selected) {
     ui.layout = UiLayout::LIST;
     copyText(ui.title, "Settings");
     ui.ring_at_bottom = true;
-    ui.show_status = true;
     ui.item_count = SET_COUNT;
     for (int i = 0; i < SET_COUNT; i++) {
         copyText(ui.items[i], setting_names[i]);
@@ -1236,7 +1222,6 @@ void InterfaceTask::openSetting(int item) {
     UiScreen ui;
     copyText(ui.title, item < SET_COUNT ? setting_names[item] : "Devices");
     ui.ring_at_bottom = true;
-    ui.show_status = true;
     PB_SmartKnobConfig config;
 
     switch (item) {
@@ -1325,7 +1310,21 @@ void InterfaceTask::navSelect() {
     int32_t sel = selectedIndex();
     switch (nav_screen_) {
         case NavScreen::APPS_LIST:
-            openApp(sel);
+            if (sel < APP_COUNT) {
+                openApp(sel);
+            } else if (sel == APP_COUNT + MENU_SETTINGS) {
+                openSettingsList(0);
+            } else if (sel == APP_COUNT + MENU_SLEEP) {
+                // Screen off; any touch, turn or button press wakes it
+                log("Sleep: screen off (from the menu)");
+                last_activity_ms_ = millis() - SLEEP_SCREEN_OFF_MS;
+                updateSleep();
+            } else {
+                #ifdef PIN_POWER_BUTTON
+                    powerOff();
+                    toast("Plugged in: can't power off");  // only reached when USB keeps it on
+                #endif
+            }
             break;
         case NavScreen::SETTINGS_LIST:
             openSetting(CLAMP(sel, (int32_t)0, (int32_t)SET_COUNT - 1));
@@ -1389,8 +1388,10 @@ void InterfaceTask::navBack() {
                 openSettingsList(open_setting_);
             }
             break;
-        case NavScreen::APPS_LIST:
         case NavScreen::SETTINGS_LIST:
+            openAppsList(APP_COUNT + MENU_SETTINGS);  // back to the main menu, on Settings
+            break;
+        case NavScreen::APPS_LIST:
             openApp(current_app_);
             break;
         default:
@@ -1483,7 +1484,6 @@ void InterfaceTask::refreshBluetoothScreen() {
     UiScreen ui;
     copyText(ui.title, setting_names[SET_BLUETOOTH]);
     ui.ring_at_bottom = true;
-    ui.show_status = true;
     fillBluetoothList(ui);
     showUi(ui);
 }

@@ -9,11 +9,17 @@ static const uint8_t LEDC_CHANNEL_LCD_BACKLIGHT = 0;
 static const int32_t CENTER = TFT_WIDTH / 2;
 static const int32_t RING_RADIUS = CENTER - 12;   // where the position dot travels
 static const int32_t DOT_SIZE = 14;
-static const int32_t LIST_SPACING = 44;           // distance between list items (pixels)
 static const int32_t LIST_ITEM_WIDTH = 200;
+// The list is drawn like a drum (a rolodex seen from the side): items sit on a
+// wheel of this radius, one item every LIST_STEP_DEG degrees. Items further
+// round the wheel bunch up, shrink and fade, and vanish past LIST_HIDE_DEG.
+static const float LIST_RADIUS = 72;              // pixels
+static const float LIST_STEP_DEG = 30;
+static const float LIST_HIDE_DEG = 80;
 
 // Colors
 static const uint32_t COLOR_ACCENT = 0x5064C8;    // blue-violet, from Scott's dot
+static const uint32_t COLOR_ACCENT_TEXT = 0x8A9BFF; // lighter accent, readable as text on black
 static const uint32_t COLOR_TRACK = 0x2A2A33;
 static const uint32_t COLOR_TEXT_DIM = 0x9A9AA8;
 static const uint32_t COLOR_TEXT_FAINT = 0x4A4A55;
@@ -132,6 +138,9 @@ void DisplayTask::run() {
 
 void DisplayTask::buildScreen() {
     lv_obj_t* screen = lv_screen_active();
+    // The list column is taller than the screen; keep the screen itself from scrolling (no scroll bar)
+    lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(screen, LV_SCROLLBAR_MODE_OFF);
     lv_obj_set_style_bg_color(screen, lv_color_black(), 0);
     lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
 
@@ -185,11 +194,10 @@ void DisplayTask::buildScreen() {
     lv_obj_align(title_label_, LV_ALIGN_TOP_MID, 0, 34);
     lv_label_set_text(title_label_, "");
 
-    // List: a column of items that slides up and down with the knob. The item
-    // nearest the middle is brightest; the others fade with distance.
+    // List: items on a drum that turns with the knob (positions set in the update)
     list_box_ = lv_obj_create(screen);
     lv_obj_remove_style_all(list_box_);
-    lv_obj_set_size(list_box_, TFT_WIDTH, UI_MAX_ITEMS * LIST_SPACING);
+    lv_obj_set_size(list_box_, TFT_WIDTH, TFT_HEIGHT);
     lv_obj_remove_flag(list_box_, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_remove_flag(list_box_, LV_OBJ_FLAG_CLICKABLE);
     for (int i = 0; i < UI_MAX_ITEMS; i++) {
@@ -199,7 +207,7 @@ void DisplayTask::buildScreen() {
         lv_obj_set_style_text_align(item, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_set_width(item, LIST_ITEM_WIDTH);
         lv_label_set_long_mode(item, LV_LABEL_LONG_DOT);
-        lv_obj_set_pos(item, (TFT_WIDTH - LIST_ITEM_WIDTH) / 2, i * LIST_SPACING + (LIST_SPACING - 28) / 2);
+        lv_obj_set_x(item, (TFT_WIDTH - LIST_ITEM_WIDTH) / 2);
         list_items_[i] = item;
     }
 
@@ -355,8 +363,8 @@ void DisplayTask::updateScreen(const PB_SmartKnobState& state) {
     lv_obj_set_pos(dot_, x, y);
 
     if (ui_.layout == UiLayout::LIST) {
-        // Slide the column so the knob's position (including the part-way turn
-        // between clicks) sits in the middle, then fade items by distance
+        // Turn the drum so the knob's position (including the part-way turn
+        // between clicks) faces you; items further round shrink and fade
         int32_t count = ui_.item_count;
         if (count == 0) {
             return;
@@ -366,11 +374,29 @@ void DisplayTask::updateScreen(const PB_SmartKnobState& state) {
             return;
         }
         shown_scroll_ = scroll;
-        lv_obj_set_y(list_box_, (int32_t)(CENTER - LIST_SPACING / 2 - scroll * LIST_SPACING));
         for (int32_t i = 0; i < count; i++) {
-            float distance = fabsf(i - scroll);
-            float brightness = distance < 1.6f ? 1 - 0.55f * distance : 0;
-            lv_obj_set_style_text_opa(list_items_[i], (lv_opa_t)(255 * fmaxf(brightness, 0)), 0);
+            float degrees = (i - scroll) * LIST_STEP_DEG;
+            lv_obj_t* item = list_items_[i];
+            if (fabsf(degrees) > LIST_HIDE_DEG) {
+                lv_obj_set_style_text_opa(item, LV_OPA_TRANSP, 0);
+                continue;
+            }
+            float radians = degrees * PI / 180;
+            float facing = cosf(radians);  // 1 = facing you, 0 = edge-on
+
+            // Smaller further round (fonts come in fixed sizes, so it steps)
+            const lv_font_t* font = facing > 0.93f ? &lv_font_montserrat_24
+                                  : facing > 0.6f  ? &lv_font_montserrat_20
+                                                   : &lv_font_montserrat_14;
+            if (lv_obj_get_style_text_font(item, 0) != font) {
+                lv_obj_set_style_text_font(item, font, 0);
+            }
+            int32_t y = CENTER + (int32_t)(LIST_RADIUS * sinf(radians)) - lv_font_get_line_height(font) / 2;
+            lv_obj_set_y(item, y);
+            lv_obj_set_style_text_opa(item, (lv_opa_t)(255 * facing * facing), 0);
+            // The item that a tap would choose is in the accent color
+            bool selected = i == (int32_t)lroundf(scroll);
+            lv_obj_set_style_text_color(item, selected ? lv_color_hex(COLOR_ACCENT_TEXT) : lv_color_white(), 0);
         }
         return;
     }
